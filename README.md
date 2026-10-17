@@ -20,7 +20,9 @@ The service (`MixBooster.exe --service`, copied to `Program Files\MixBooster`) c
 time a display adapter arrives. A driver install or update recreates the device's registry key; the service writes the
 policy back and restarts the GPU driver. *Reset* removes the service and the policy.
 
-The ranking: every metric relative to the best core, the 1% and 0.1% lows counted twice, the average and the STDEV once.
+The ranking: every metric as the core's distance from the median core (capped at 15%), weighted: 1% low 22, 0.1% low 18,
+1% percentile 12, average 12, 0.01% low 10, 0.1% percentile 10, STDEV 10, min 4, max 2. CPU 0 is never suggested, and
+binding to it by hand asks first: Windows handles most of its own interrupts there.
 
 Data lives in `%ProgramData%\MixBooster` (`gpu-affinity.txt`, `log.txt`, the unpacked tools in `bin`).
 The binding is in `HKLM\SOFTWARE\MixBooster` (`GpuMask`).

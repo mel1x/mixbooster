@@ -214,34 +214,58 @@ static bool bench_avg(int cpu, CpuResult *out)
     return true;
 }
 
-// Ranks the cores by the averaged results, by the lows only: what matters for a GPU's interrupts is how even the
-// frames are, not the average. The 1% low weighs 40%, the 0.1% low 35%, the noisier 0.01% low 25%, each relative
-// to the best core.
+// How much each metric counts in the ranking, in percent. Smoothness first: the 1% and 0.1% lows and the matching
+// percentiles are what a stutter looks like. The 0.01% low is a handful of frames, so it counts less; the average
+// still matters; the STDEV says how even the frame times are; min and max are single frames, mostly noise.
+static const f32 k_weight[M__COUNT] = {
+    [M_LOW1] = 22, [M_LOW01] = 18, [M_LOW001] = 10, [M_P1] = 12, [M_P01] = 10, [M_AVG] = 12, [M_STDEV] = 10, [M_MIN] = 4, [M_MAX] = 2,
+};
+
+static int cmp_f32(const void *a, const void *b)
+{
+    f32 x = *(const f32 *)a, y = *(const f32 *)b;
+    return x < y ? -1 : x > y;
+}
+
+// Ranks the cores by the averaged results. Each metric becomes how far the core is from the median core, in parts:
+// +0.03 is 3% better (for the STDEV, lower is better). That is capped at 15% either way, so one lucky or unlucky
+// frame in the 0.01% low or the max can't carry a core alone. The score is the weighted sum.
+// CPU 0 is measured but never suggested: Windows sends most of its own interrupts and DPCs there, which a quiet test
+// doesn't show, while a game does.
 static int bench_best(int *best, int want)
 {
     CpuResult avg[MAX_CPUS];
-    f32 top[M__COUNT] = { 0 };
-    top[M_STDEV] = 1e9f;
+    f32 med[M__COUNT], col[MAX_CPUS];
     int have = 0;
-    for (int c = 0; c < B.ncpu; c++) {
-        if (!bench_avg(c, &avg[c])) continue;
-        have++;
-        for (int m = 0; m < M__COUNT; m++) top[m] = m == M_STDEV ? MIN(top[m], avg[c].v[m]) : MAX(top[m], avg[c].v[m]);
+    for (int c = 0; c < B.ncpu; c++) have += bench_avg(c, &avg[c]);
+    if (!have) return 0;
+    for (int m = 0; m < M__COUNT; m++) {
+        int k = 0;
+        for (int c = 0; c < B.ncpu; c++)
+            if (avg[c].ok) col[k++] = avg[c].v[m];
+        qsort(col, (size_t)k, sizeof(f32), cmp_f32);
+        med[m] = k & 1 ? col[k / 2] : (col[k / 2 - 1] + col[k / 2]) * 0.5f;
     }
     f32 score[MAX_CPUS];
     for (int c = 0; c < B.ncpu; c++) {
-        score[c] = -1;
-        if (!avg[c].ok || top[M_AVG] <= 0) continue;
-        score[c] = 0.40f * avg[c].v[M_LOW1] / MAX(top[M_LOW1], 1e-3f) + 0.35f * avg[c].v[M_LOW01] / MAX(top[M_LOW01], 1e-3f) +
-                   0.25f * avg[c].v[M_LOW001] / MAX(top[M_LOW001], 1e-3f);
+        score[c] = -1e9f;
+        if (!avg[c].ok || c == 0) continue;
+        f32 sc = 0;
+        for (int m = 0; m < M__COUNT; m++) {
+            f32 v = avg[c].v[m], d = 0;
+            if (v > 0 && med[m] > 0) d = m == M_STDEV ? med[m] / v - 1.f : v / med[m] - 1.f;
+            sc += k_weight[m] * CLAMP(d, -0.15f, 0.15f);
+        }
+        score[c] = sc;
     }
     int n = 0;
-    for (; n < want && n < have; n++) {
+    for (; n < want; n++) {
         int b = -1;
         for (int c = 0; c < B.ncpu; c++)
-            if (score[c] >= 0 && (b < 0 || score[c] > score[b])) b = c;
+            if (score[c] > -1e8f && (b < 0 || score[c] > score[b])) b = c;
+        if (b < 0) break;
         best[n] = b;
-        score[b] = -1;
+        score[b] = -1e9f;
     }
     return n;
 }

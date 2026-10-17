@@ -137,7 +137,7 @@ static struct {
 
 static void start_or_stop(void);
 // What the dialog before a test starts: the whole test, one run again, or one more run.
-enum { MM_FULL, MM_RERUN, MM_ADD };
+enum { MM_FULL, MM_RERUN, MM_ADD, MM_CPU0 };
 static void ovl_update(void);
 
 static f32 S(f32 v) { return floorf(v * A.s + 0.5f); }
@@ -927,6 +927,19 @@ typedef struct ModalItem {
 
 static int modal_items(ModalItem *it, WCHAR *eta, int cap)
 {
+    if (A.mmode == MM_CPU0) {
+        it[0] = (ModalItem){ 0xEEA1, TR("На CPU 0 работает сама Windows", "Windows itself works on CPU 0"),
+                             TR("Туда по умолчанию идёт большая часть системных прерываний, DPC и фоновых задач. Видеокарта на том же ядре будет "
+                                "ждать их в очереди, а задержки кадров вырастут.",
+                                "Most system interrupts, DPCs and background work go there by default. A GPU on the same core waits behind "
+                                "them in the queue, and frame times grow.") };
+        it[1] = (ModalItem){ 0xE9D9, TR("Тест этого не покажет", "The test won't show it"),
+                             TR("Тест идёт на почти пустом ПК, поэтому CPU 0 может выглядеть хорошо. В игре с браузером, Discord и записью экрана "
+                                "нагрузка на нём гораздо выше. Поэтому MixBooster его никогда не предлагает.",
+                                "The test runs on an almost idle PC, so CPU 0 can look fine. In a game with a browser, Discord and screen "
+                                "recording the load on it is much higher. That's why MixBooster never suggests it.") };
+        return 2;
+    }
     f64 step = BENCH_SETTLE_SEC + BENCH_WARMUP_SEC + BENCH_MEASURE_SEC;
     WCHAR d[48];
     fmt_duration(d, countof(d), step * (A.mmode == MM_FULL ? A.cpu.count * A.runs : B.ncpu));
@@ -967,8 +980,10 @@ static void modal_pass(bool draw)
     f32 k = ease_out_cubic(A.modal_t);
     f32 x = floorf(((f32)A.W - w) * 0.5f), y = floorf(((f32)A.H - h) * 0.5f + (1.f - k) * S(12));
     A.m_panel = (Box){ x, y, w, h };
-    A.m_ok = (Box){ x + w - pad - S(150), y + h - pad - S(34), S(150), S(34) };
-    A.m_cancel = (Box){ A.m_ok.x - S(8) - S(110), A.m_ok.y, S(110), S(34) };
+    bool warn = A.mmode == MM_CPU0;
+    f32 okw = warn ? S(200) : S(150), cw = warn ? S(150) : S(110);
+    A.m_ok = (Box){ x + w - pad - okw, y + h - pad - S(34), okw, S(34) };
+    A.m_cancel = (Box){ A.m_ok.x - S(8) - cw, A.m_ok.y, cw, S(34) };
     if (!draw) return;
 
     R.opacity = k;
@@ -978,10 +993,11 @@ static void modal_pass(bool draw)
     r_rect_ex(x, y, w, h, t->dark ? RGBA(255, 255, 255, 22) : RGBA(0, 0, 0, 22), S(12), 1.f, 0);
 
     f32 cy = y + pad + S(18), ic = S(36);
-    r_rect(x + pad, cy - ic * 0.5f, ic, ic, color_alpha(t->accent, 0.18f), S(9));
-    text_draw_icon(0xE768, SC(16), x + pad + ic * 0.5f, cy, t->text);
+    r_rect(x + pad, cy - ic * 0.5f, ic, ic, color_alpha(warn ? t->warn : t->accent, 0.18f), S(9));
+    text_draw_icon(warn ? 0xE7BA : 0xE768, SC(16), x + pad + ic * 0.5f, cy, warn ? t->warn : t->text);
     WCHAR title[64];
-    if (A.mmode == MM_RERUN) wfmt(title, countof(title), TR("Перезапуск прогона %d", "Running run %d again"), A.mrun + 1);
+    if (warn) wcopy(title, countof(title), TR("CPU 0 лучше не выбирать", "Better not CPU 0"));
+    else if (A.mmode == MM_RERUN) wfmt(title, countof(title), TR("Перезапуск прогона %d", "Running run %d again"), A.mrun + 1);
     else if (A.mmode == MM_ADD) wfmt(title, countof(title), TR("Новый прогон %d", "New run %d"), A.mrun + 1);
     else wcopy(title, countof(title), TR("Перед началом теста", "Before the test"));
     text_draw(FONT_TEXT_SEMIBOLD, SC(19), x + pad + ic + S(14), baseline_for(FONT_TEXT_SEMIBOLD, SC(19), cy), title, -1, t->text);
@@ -1004,8 +1020,12 @@ static void modal_pass(bool draw)
     }
     r_rect(x + S(1), A.m_ok.y - S(18), w - S(2), 1, t->sep, 0);
     Hit *hv = &A.hover;
-    draw_button(&A.m_cancel, TR("Отмена", "Cancel"), 0, BTN_NEUTRAL, A.hv[HV_MCANCEL], A.press.type == HT_MCANCEL && hv->type == HT_MCANCEL, false);
-    draw_button(&A.m_ok, A.mmode == MM_RERUN ? TR("Перезапустить", "Run again") : A.mmode == MM_ADD ? TR("Запустить", "Start") : TR("Начать тест", "Start test"),
+    draw_button(&A.m_cancel, warn ? TR("Выбрать другие", "Pick others") : TR("Отмена", "Cancel"), 0, BTN_NEUTRAL, A.hv[HV_MCANCEL],
+                A.press.type == HT_MCANCEL && hv->type == HT_MCANCEL, false);
+    if (warn)
+        draw_button(&A.m_ok, TR("Всё равно привязать", "Bind anyway"), 0xE71B, BTN_ACCENT, A.hv[HV_MOK], A.press.type == HT_MOK && hv->type == HT_MOK,
+                    g_task_busy != 0);
+    else draw_button(&A.m_ok, A.mmode == MM_RERUN ? TR("Перезапустить", "Run again") : A.mmode == MM_ADD ? TR("Запустить", "Start") : TR("Начать тест", "Start test"),
                 GLYPH_PLAY, BTN_ACCENT, A.hv[HV_MOK], A.press.type == HT_MOK && hv->type == HT_MOK, false);
     R.opacity = 1.f;
 }
@@ -1025,7 +1045,18 @@ static void modal_open_mode(int mode, int run)
 static void modal_close(bool start)
 {
     A.modal = false;
-    if (start) {
+    if (A.mmode == MM_CPU0) {
+        // bind anyway, or back to the picker with the selection kept
+        A.modal_t = 0;
+        if (start && !g_task_busy) {
+            A.note[0] = 0;
+            task_start(A.hwnd, true, A.pk_mask);
+        } else if (!start) {
+            A.picker = true;
+            A.picker_t = 0;
+            A.hover.type = HT_NONE;
+        }
+    } else if (start) {
         // Gone at once: no fade-out drawn over the start of the test.
         A.modal_t = 0;
         if (A.mmode == MM_FULL) start_or_stop();
@@ -1094,6 +1125,8 @@ static void picker_pass(bool draw)
         for (int r = 0; r < A.nbest && n >= 0; r++)
             if (A.best[r] == i) n += wfmt(sub + n, countof(sub) - n, r ? TR(" · топ 2", " · top 2") : TR(" · топ 1", " · top 1"));
         text_draw_fit(FONT_TEXT, SC(11.5f), b->x + S(12), baseline_for(FONT_TEXT, SC(11.5f), b->y + S(40)), b->w - S(20), sub, -1, t->dim, false);
+        // CPU 0 carries Windows' own interrupts: a warning mark, and a warning before binding to it
+        if (i == 0 && !on) text_draw_icon(0xE7BA, SC(12), b->x + b->w - S(17), b->y + S(17), t->warn);
         if (on) {
             f32 d = S(18), dx = b->x + b->w - S(8) - d, dy = b->y + S(8);
             r_rect(dx, dy, d, d, t->accent, d * 0.5f);
@@ -1131,9 +1164,17 @@ static void picker_open(void)
     invalidate();
 }
 
+static void modal_open_mode(int mode, int run);
+
 static void picker_close(bool bind)
 {
     A.picker = false;
+    // CPU 0 in the selection: a warning first, with the way back to the picker
+    if (bind && (A.pk_mask & 1) && !g_task_busy) {
+        A.picker_t = 0;
+        modal_open_mode(MM_CPU0, 0);
+        return;
+    }
     if (bind && A.pk_mask && !g_task_busy) {
         A.note[0] = 0;
         task_start(A.hwnd, true, A.pk_mask);

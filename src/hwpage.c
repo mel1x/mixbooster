@@ -70,8 +70,8 @@ static void draw_hw_score(const Box *b)
     f32 x = cx + r + S(52), x1 = b->x + b->w - S(24), y = b->y + S(24);
     text_draw(FONT_TEXT_SEMIBOLD, SC(17), x, baseline_for(FONT_TEXT_SEMIBOLD, SC(17), y + S(4)), TR("Оценка ПК", "PC score"), -1, t->text);
     text_wrap(FONT_TEXT, SC(12.5f), x, baseline_for(FONT_TEXT, SC(12.5f), y + S(30)), x1 - x, S(18),
-              TR("Насколько ПК мощный для игр: 100 - топовый игровой ПК сегодня. Оценка примерная, по моделям и характеристикам, без тестов.",
-                 "How strong the PC is for games: 100 is a top gaming PC of today. A rough estimate from the models and specs, not a benchmark."),
+              TR("Сравнение с топовым игровым ПК сегодня, это 100. Считается по видеокарте, процессору, памяти и системному диску.",
+                 "Compared with a top gaming PC of today, which is 100. Counted from the graphics card, processor, memory and system drive."),
               t->dim, true);
     static const struct { u32 glyph; const WCHAR *ru, *en; } parts[SC__COUNT] = {
         { 0xF211, L"Видеокарта", L"Graphics" }, { 0xEEA1, L"Процессор", L"Processor" },

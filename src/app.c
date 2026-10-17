@@ -261,13 +261,36 @@ static void draw_button(const Box *b, const WCHAR *label, u32 glyph, int style, 
     text_draw(FONT_TEXT, fs, x + gw, baseline_for(FONT_TEXT, fs, mid), label, -1, fg);
 }
 
+// The logo, as in tools/make-icon.py: a chip with one core lit, on a dark tile like MixLauncher's and MixWidgets'.
+// Art units 0..100 cover the inner 62% of the tile.
 static void draw_logo(f32 x, f32 y, f32 sz)
 {
-    f32 rad = floorf(sz * 0.26f + 0.5f);
-    r_rect(x, y, sz, sz, A.th.accent, rad);
-    r_rect_ex(x + sz * 0.15f, y - sz * 0.05f, sz * 0.9f, sz * 0.7f, RGBA(255, 255, 255, 34), sz * 0.35f, 0, sz * 0.22f);
-    r_rect_ex(x, y, sz, sz, RGBA(255, 255, 255, 30), rad, 1.f, 0);
-    text_draw_icon(0xE945, sz * 0.52f, x + sz * 0.5f, y + sz * 0.52f, A.th.on_accent);
+    x = floorf(x);
+    y = floorf(y);
+    f32 rad = floorf(sz * 0.225f + 0.5f), u = sz * 0.62f / 100.f, ox = x + sz * 0.19f, oy = y + sz * 0.19f;
+    r_rect(x, y, sz, sz, RGBA(0x1E, 0x21, 0x28, 255), rad);
+    r_rect_ex(x, y, sz, sz, RGBA(255, 255, 255, 26), rad, 1.f, 0);
+    u32 pin = RGBA(0x2C, 0x5E, 0x3A, 255);
+    for (int i = 0; i < 3; i++) {
+        f32 o = 32.f + 18.f * (f32)i;
+        r_rect(ox + (o - 4) * u, oy + 2 * u, 8 * u, 12 * u, pin, 3 * u);
+        r_rect(ox + (o - 4) * u, oy + 86 * u, 8 * u, 12 * u, pin, 3 * u);
+        r_rect(ox + 2 * u, oy + (o - 4) * u, 12 * u, 8 * u, pin, 3 * u);
+        r_rect(ox + 86 * u, oy + (o - 4) * u, 12 * u, 8 * u, pin, 3 * u);
+    }
+    // The body's soft top-to-bottom gradient, one pixel row at a time through the clip.
+    f32 bx = ox + 14 * u, by = oy + 14 * u, bs = 72 * u, saved[4];
+    memcpy(saved, R.clip, sizeof saved);
+    for (int r = 0; r < (int)ceilf(bs); r++) {
+        f32 y0 = MAX(by + (f32)r, saved[1]), y1 = MIN(by + (f32)r + 1.f, saved[3]);
+        if (y1 <= y0) continue;
+        r_set_clip(saved[0], y0, saved[2], y1);
+        r_rect(bx, by, bs, bs, color_mix(RGBA(0x3D, 0x85, 0x52, 255), RGBA(0x27, 0x55, 0x3A, 255), ((f32)r + 0.5f) / bs), 14 * u);
+    }
+    memcpy(R.clip, saved, sizeof saved);
+    static const f32 cells[4][2] = { { 26, 26 }, { 52, 26 }, { 26, 52 }, { 52, 52 } };
+    for (int i = 0; i < 4; i++)
+        r_rect(ox + cells[i][0] * u, oy + cells[i][1] * u, 22 * u, 22 * u, i == 1 ? RGBA(0xA6, 0xF0, 0x8E, 255) : RGBA(0x46, 0x9C, 0x5C, 255), 6 * u);
 }
 
 // --- layout --------------------------------------------------------------------------------------------------------

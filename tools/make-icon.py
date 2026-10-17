@@ -1,33 +1,70 @@
-# Draws res/mixbooster.ico: a rounded blue tile with a lightning bolt, like the logo in the sidebar.
+# Draws res/mixbooster.ico and res/logo.png: the "chip with one core lit" logo on a MixLauncher-style dark tile.
+# The same geometry is drawn in the app by draw_logo (src/app.c); keep them in step.
 # python tools/make-icon.py  (needs Pillow)
 import os
+
 from PIL import Image, ImageDraw
 
-S = 1024
-img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-# vertical gradient tile
-grad = Image.new("RGBA", (S, S))
-top, bot = (76, 166, 255), (0, 95, 184)
-for y in range(S):
-    t = y / (S - 1)
-    c = tuple(int(top[i] + (bot[i] - top[i]) * t) for i in range(3)) + (255,)
-    ImageDraw.Draw(grad).line([(0, y), (S, y)], fill=c)
-mask = Image.new("L", (S, S), 0)
-pad = 40
-ImageDraw.Draw(mask).rounded_rectangle([pad, pad, S - pad, S - pad], radius=230, fill=255)
-img.paste(grad, (0, 0), mask)
-# soft highlight
-hl = Image.new("L", (S, S), 0)
-ImageDraw.Draw(hl).ellipse([150, -260, 1000, 520], fill=14)
-white = Image.new("RGBA", (S, S), (255, 255, 255, 255))
-hl_masked = Image.new("L", (S, S), 0)
-hl_masked.paste(hl, (0, 0), mask)
-img = Image.composite(white, img, hl_masked)
-# the bolt
-d = ImageDraw.Draw(img)
-bolt = [(590, 170), (300, 560), (480, 560), (420, 860), (730, 440), (545, 440), (640, 170)]
-d.polygon(bolt, fill=(255, 255, 255, 255))
-out = os.path.join(os.path.dirname(__file__), "..", "res", "mixbooster.ico")
-img.save(out, sizes=[(16, 16), (20, 20), (24, 24), (32, 32), (40, 40), (48, 48), (64, 64), (128, 128), (256, 256)])
-img.resize((256, 256), Image.LANCZOS).save(os.path.join(os.path.dirname(__file__), "..", "res", "logo.png"))
-print("ok")
+HERE = os.path.dirname(os.path.abspath(__file__))
+RES = os.path.join(HERE, "..", "res")
+SS = 4
+N = 256 * SS
+
+TILE = (0x1E, 0x21, 0x28, 255)
+PIN = 0x2C5E3A
+BODY_TOP, BODY_BOTTOM = 0x3D8552, 0x27553A   # the only gradient: a soft light from above
+CORE = 0x469C5C
+LIT = 0xA6F08E
+
+
+def rgb(v):
+    return ((v >> 16) & 255, (v >> 8) & 255, v & 255, 255)
+
+
+def U(v):
+    # art units 0..100 over the inner 62% of the tile, like MixWidgets' app tile
+    inner = N * 0.62
+    return (N - inner) / 2 + v / 100 * inner
+
+
+def k(v):
+    return v / 100 * N * 0.62
+
+
+def R(x0, y0, x1, y1):
+    return [U(x0), U(y0), U(x1), U(y1)]
+
+
+def main():
+    img = Image.new("RGBA", (N, N), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    r = int(N * 0.225)
+    d.rounded_rectangle([0, 0, N - 1, N - 1], radius=r, fill=TILE)
+    d.rounded_rectangle([0, 0, N - 1, N - 1], radius=r, outline=(255, 255, 255, 26), width=SS * 2)
+
+    for o in (32, 50, 68):
+        for box in ((o - 4, 2, o + 4, 14), (o - 4, 86, o + 4, 98), (2, o - 4, 14, o + 4), (86, o - 4, 98, o + 4)):
+            d.rounded_rectangle(R(*box), radius=k(3), fill=rgb(PIN))
+
+    # the body: a vertical gradient through a rounded mask
+    mask = Image.new("L", (N, N), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(R(14, 14, 86, 86), radius=k(14), fill=255)
+    top, bot = rgb(BODY_TOP), rgb(BODY_BOTTOM)
+    y0, y1 = U(14), U(86)
+    grad = Image.new("RGBA", (1, N))
+    for y in range(N):
+        t = min(1.0, max(0.0, (y - y0) / (y1 - y0)))
+        grad.putpixel((0, y), tuple(int(top[i] + (bot[i] - top[i]) * t) for i in range(4)))
+    img.paste(grad.resize((N, N)), (0, 0), mask)
+
+    for i, (x, y) in enumerate([(26, 26), (52, 26), (26, 52), (52, 52)]):
+        d.rounded_rectangle(R(x, y, x + 22, y + 22), radius=k(6), fill=rgb(LIT if i == 1 else CORE))
+
+    out = img.resize((256, 256), Image.LANCZOS)
+    out.save(os.path.join(RES, "logo.png"))
+    out.save(os.path.join(RES, "mixbooster.ico"), sizes=[(16, 16), (20, 20), (24, 24), (32, 32), (40, 40), (48, 48), (64, 64), (128, 128), (256, 256)])
+    print("ok")
+
+
+if __name__ == "__main__":
+    main()

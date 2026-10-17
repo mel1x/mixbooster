@@ -38,11 +38,20 @@ typedef struct HwStat {
     WCHAR value[24], unit[24], label[48];
 } HwStat;
 
-static struct {
-    volatile LONG ready, busy, again;  // again: the language changed while reading, read once more
+typedef struct HwData {
     HwCard card[HWC__COUNT];
     HwStat stat[4];
-} HW;
+    int score_total, score_part[SC__COUNT];
+} HwData;
+
+// The thread builds HWT off-screen and swaps it into HW.d whole, so the page never shows half-read data: the old
+// parts stay up until the new ones are ready.
+static struct {
+    volatile LONG ready, busy, again;  // again: the language changed while reading, read once more
+    SRWLOCK lock;                      // the swap, and the page while it draws
+    HwData d;
+} HW = { 0, 0, 0, SRWLOCK_INIT };
+static HwData HWT;
 
 static const WCHAR *k_gb, *k_tb;
 
@@ -245,7 +254,7 @@ static void mem_maker(WCHAR *s)
 
 static void hw_cpu(const CpuInfo *ci)
 {
-    HwCard *c = &HW.card[HWC_CPU];
+    HwCard *c = &HWT.card[HWC_CPU];
     c->glyph = 0xEEA1;
     wcopy(c->cat, countof(c->cat), TR("Процессор", "Processor"));
     wcopy(c->head, countof(c->head), ci->name[0] ? ci->name : L"CPU");
@@ -292,10 +301,10 @@ static void hw_cpu(const CpuInfo *ci)
         row_add(c, false, TR("Производитель", "Vendor"), L"%s",
                 !wcscmp(vendor, L"AuthenticAMD") ? L"AMD" : !wcscmp(vendor, L"GenuineIntel") ? L"Intel" : vendor);
 
-    wfmt(HW.stat[0].value, countof(HW.stat[0].value), L"%d", ci->count);
-    wcopy(HW.stat[0].unit, countof(HW.stat[0].unit), L"");
-    wcopy(HW.stat[0].label, countof(HW.stat[0].label), TR("потоков процессора", "CPU threads"));
-    HW.stat[0].glyph = 0xEEA1;
+    wfmt(HWT.stat[0].value, countof(HWT.stat[0].value), L"%d", ci->count);
+    wcopy(HWT.stat[0].unit, countof(HWT.stat[0].unit), L"");
+    wcopy(HWT.stat[0].label, countof(HWT.stat[0].label), TR("потоков процессора", "CPU threads"));
+    HWT.stat[0].glyph = 0xEEA1;
 }
 
 static const DEVPROPKEY k_pci_speed = { { 0x3ab22e31, 0x8264, 0x4b4e, { 0x9a, 0xf5, 0xa8, 0xd2, 0xd8, 0xe3, 0x3e, 0x62 } }, 9 };
@@ -339,7 +348,7 @@ static void gpu_driver_text(const GpuInfo *g, WCHAR *out, int cap)
 
 static void hw_gpu(void)
 {
-    HwCard *c = &HW.card[HWC_GPU];
+    HwCard *c = &HWT.card[HWC_GPU];
     c->glyph = 0xF211;
     wcopy(c->cat, countof(c->cat), TR("Видеокарта", "Graphics"));
     GpuInfo gi[MAX_GPUS];
@@ -417,7 +426,7 @@ static void hw_gpu(void)
     for (int i = 0; i < n; i++)
         if (i != m) row_add(c, true, gi[i].name, L"%s", gi[i].integrated ? TR("встроенная", "integrated") : TR("ещё одна видеокарта", "another GPU"));
 
-    HwStat *s = &HW.stat[2];
+    HwStat *s = &HWT.stat[2];
     s->glyph = 0xF211;
     if (g->vram) {
         f64 gb = (f64)g->vram / (1024.0 * 1024 * 1024);
@@ -431,7 +440,7 @@ static void hw_gpu(void)
 
 static void hw_ram(void)
 {
-    HwCard *c = &HW.card[HWC_RAM];
+    HwCard *c = &HWT.card[HWC_RAM];
     c->glyph = 0xE964;
     wcopy(c->cat, countof(c->cat), TR("Оперативная память", "Memory"));
     MEMORYSTATUSEX ms = { sizeof ms };
@@ -479,7 +488,7 @@ static void hw_ram(void)
     fmt_size(avail, countof(avail), ms.ullTotalPhys);
     row_add(c, false, TR("Используется", "In use"), TR("%s из %s (%lu%%)", "%s of %s (%lu%%)"), used, avail, ms.dwMemoryLoad);
 
-    HwStat *s = &HW.stat[1];
+    HwStat *s = &HWT.stat[1];
     s->glyph = 0xE964;
     f64 gb = (f64)installed / (1024.0 * 1024 * 1024);
     wfmt(s->value, countof(s->value), gb == floor(gb) ? L"%.0f" : L"%.1f", gb);
@@ -489,7 +498,7 @@ static void hw_ram(void)
 
 static void hw_board(void)
 {
-    HwCard *c = &HW.card[HWC_BOARD];
+    HwCard *c = &HWT.card[HWC_BOARD];
     c->glyph = 0xE950;
     wcopy(c->cat, countof(c->cat), TR("Материнская плата", "Motherboard"));
     const WCHAR *bk = L"HARDWARE\\DESCRIPTION\\System\\BIOS";
@@ -556,7 +565,7 @@ static void disk_letters(WCHAR letters[32][24])
 
 static void hw_disks(void)
 {
-    HwCard *c = &HW.card[HWC_DISK];
+    HwCard *c = &HWT.card[HWC_DISK];
     c->glyph = 0xEDA2;
     wcopy(c->cat, countof(c->cat), TR("Накопители", "Storage"));
     WCHAR letters[32][24];
@@ -617,7 +626,7 @@ static void hw_disks(void)
     }
     else wfmt(c->sub, countof(c->sub), TR("Всего %s", "%s in total"), ts);
 
-    HwStat *s = &HW.stat[3];
+    HwStat *s = &HWT.stat[3];
     s->glyph = 0xEDA2;
     f64 gb = (f64)total / (1024.0 * 1024 * 1024);
     if (gb >= 1000) {
@@ -632,7 +641,7 @@ static void hw_disks(void)
 
 static void hw_displays(void)
 {
-    HwCard *c = &HW.card[HWC_DISPLAY];
+    HwCard *c = &HWT.card[HWC_DISPLAY];
     c->glyph = 0xE7F4;
     wcopy(c->cat, countof(c->cat), TR("Мониторы", "Displays"));
     UINT32 np = 0, nm = 0;
@@ -685,7 +694,7 @@ static void hw_displays(void)
 
 static void hw_net(void)
 {
-    HwCard *c = &HW.card[HWC_NET];
+    HwCard *c = &HWT.card[HWC_NET];
     c->glyph = 0xE839;
     wcopy(c->cat, countof(c->cat), TR("Сеть", "Network"));
     ULONG len = 32 * 1024;
@@ -726,7 +735,7 @@ static void hw_net(void)
 
 static void hw_os(void)
 {
-    HwCard *c = &HW.card[HWC_OS];
+    HwCard *c = &HWT.card[HWC_OS];
     c->glyph = 0xE770;
     wcopy(c->cat, countof(c->cat), TR("Система", "System"));
     const WCHAR *vk = L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
@@ -765,8 +774,7 @@ static DWORD WINAPI hw_thread(void *arg)
     HWND notify = (HWND)arg;
 again:
     // everything is rebuilt: the texts are in the current language
-    memset(HW.card, 0, sizeof HW.card);
-    memset(HW.stat, 0, sizeof HW.stat);
+    memset(&HWT, 0, sizeof HWT);
     memset(&SMB, 0, sizeof SMB);
     memset(&SCORE, 0, sizeof SCORE);
     k_gb = TR("ГБ", "GB");
@@ -784,6 +792,11 @@ again:
     hw_os();
     score_compute();
     if (InterlockedExchange(&HW.again, 0)) goto again;
+    HWT.score_total = SCORE.total;
+    memcpy(HWT.score_part, SCORE.part, sizeof HWT.score_part);
+    AcquireSRWLockExclusive(&HW.lock);
+    HW.d = HWT;
+    ReleaseSRWLockExclusive(&HW.lock);
     InterlockedExchange(&HW.ready, 1);
     InterlockedExchange(&HW.busy, 0);
     PostMessageW(notify, WM_APP_HW, 0, 0);
@@ -792,7 +805,6 @@ again:
 
 static void hw_start(HWND notify)
 {
-    InterlockedExchange(&HW.ready, 0);
     if (InterlockedExchange(&HW.busy, 1)) {
         InterlockedExchange(&HW.again, 1);
         return;

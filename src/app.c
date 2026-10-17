@@ -105,6 +105,8 @@ static struct {
     f32 nav_y, nav_v, nav_hov[PG__COUNT];
     f32 hw_scroll, hw_scroll_target, hw_scroll_v, hw_content_h, hw_sb_t;
     f32 hl_scroll, hl_scroll_target, hl_scroll_v, hl_content_h, hl_sb_t;
+    f32 hw_fade, hl_fade;     // the data over its skeleton, 0..1
+    f64 hw_t0, hl_t0;         // when a reading began: the skeleton stays a moment, so a fast one doesn't blink
     Box hl_refresh;
     bool picker;              // the manual core picker
     f32 picker_t;
@@ -1049,18 +1051,22 @@ static void draw_all(void)
     f32 x0 = content_x0();
     WCHAR sub[300];
     if (A.page == PG_HW) {
+        AcquireSRWLockShared(&HW.lock);
         text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, TR("Комплектующие ПК", "PC components"), -1, t->text);
         if (HW.ready) {
-            const HwCard *os = &HW.card[HWC_OS];
+            const HwCard *os = &HW.d.card[HWC_OS];
             wfmt(sub, countof(sub), L"%s · %s", os->nrows ? os->rows[0].v : L"PC", os->head);
             text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100), sub, -1, t->dim, false);
         }
         draw_hw_page(rise);
+        ReleaseSRWLockShared(&HW.lock);
     } else if (A.page == PG_HEALTH) {
+        AcquireSRWLockShared(&HL.lock);
         text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, TR("Здоровье ПК", "PC health"), -1, t->text);
         text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100),
                       TR("Диски, батарея и стабильность системы за 30 дней", "Drives, battery and system stability over 30 days"), -1, t->dim, false);
         draw_health_page(rise);
+        ReleaseSRWLockShared(&HL.lock);
     } else {
         text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, L"GPU Affinity", -1, t->text);
         const WCHAR *gpu = A.ngpu ? A.gpu[0].name : TR("Видеокарта не найдена", "No GPU found");
@@ -1160,6 +1166,13 @@ static bool animate(f32 dt)
     anim |= spring_step(&A.hw_scroll, &A.hw_scroll_v, A.hw_scroll_target, 24.f, dt);
     bool hw_sb = A.page == PG_HW && hw_max_scroll() > 0 && A.mx >= content_x0();
     anim |= approach(&A.hw_sb_t, hw_sb ? 1.f : 0.f, hw_sb ? 20.f : 7.f, dt);
+    // the data fades in over its skeleton once read; a new reading fades it out quickly first
+    f64 now = time_now();
+    bool hw_show = HW.ready && !HW.busy && now - A.hw_t0 >= 0.45, hl_show = HL.ready && !HL.busy && now - A.hl_t0 >= 0.6;
+    anim |= approach(&A.hw_fade, hw_show ? 1.f : 0.f, hw_show ? 7.f : 22.f, dt);
+    anim |= approach(&A.hl_fade, hl_show ? 1.f : 0.f, hl_show ? 7.f : 22.f, dt);
+    // the skeletons' shimmer runs while they are on screen
+    if ((A.page == PG_HW && !hw_show) || (A.page == PG_HEALTH && !hl_show)) anim = true;
     A.hl_scroll_target = CLAMP(A.hl_scroll_target, 0.f, hl_max_scroll());
     anim |= spring_step(&A.hl_scroll, &A.hl_scroll_v, A.hl_scroll_target, 24.f, dt);
     bool hl_sb = A.page == PG_HEALTH && hl_max_scroll() > 0 && A.mx >= content_x0();
@@ -1253,7 +1266,7 @@ static Hit hit_test(int mx, int my)
         nav_box(i, &n);
         if (in_b(&n, x, y)) return (Hit){ HT_NAV, i };
     }
-    if (A.page == PG_HEALTH && HL.ncards && in_b(&A.hl_refresh, x, y)) return (Hit){ HT_HLREFRESH, -1 };
+    if (A.page == PG_HEALTH && A.hl_refresh.w > 0 && in_b(&A.hl_refresh, x, y)) return (Hit){ HT_HLREFRESH, -1 };
     if (A.page != PG_AFF) return h;
     Box sl = { A.slider.x - S(12), A.slider.y - S(14), A.slider.w + S(24), S(28) };
     if (!B.running && in_b(&sl, x, y)) h.type = HT_SLIDER;
@@ -1281,13 +1294,25 @@ static void slider_set(int mx)
     }
 }
 
+static void hw_refresh(void)
+{
+    A.hw_t0 = time_now();
+    hw_start(A.hwnd);
+}
+
+static void health_refresh(void)
+{
+    A.hl_t0 = time_now();
+    health_start(A.hwnd);
+}
+
 static void lang_switch(void)
 {
     g_lang_ru = !g_lang_ru;
     lang_save();
     // the parts and health pages hold ready-made texts: read them again in the new language
-    hw_start(A.hwnd);
-    health_start(A.hwnd);
+    hw_refresh();
+    health_refresh();
     A.page_t = 0;
     invalidate();
 }
@@ -1384,7 +1409,7 @@ static void mouse_up(int mx, int my)
             break;
         case HT_PKCLEAR: A.pk_mask = 0; break;
         case HT_HLREFRESH:
-            if (!HL.busy) health_start(A.hwnd);
+            if (!HL.busy) health_refresh();
             break;
         case HT_PKOK:
             if (A.pk_mask && !(A.pk_mask == A.bound_mask && A.svc_on)) picker_close(true);
@@ -1637,7 +1662,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         bool was_bound = A.bound_mask != 0;
         refresh_binding();
         // the parts page shows where the GPU interrupts go
-        hw_start(h);
+        hw_refresh();
         if (A.bound_mask) {
             A.note_bad = !wp;
             wfmt(A.note, countof(A.note),
@@ -1745,6 +1770,7 @@ static bool app_open(void)
     nav_box(A.page, &nb);
     A.nav_y = nb.y;
     A.lang_t = g_lang_ru ? 0.f : 1.f;
+    A.hw_t0 = A.hl_t0 = time_now();
     hw_start(A.hwnd);
     health_start(A.hwnd);
     A.last_frame = time_now();

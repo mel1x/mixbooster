@@ -13,19 +13,26 @@
 
 #define HL_CARDS 12
 
-static struct {
-    volatile LONG ready, busy, again;
+typedef struct HlData {
     HwCard card[HL_CARDS];
     int ncards;
     HwStat stat[4];
     u8 state;                       // the worst of all: HS_GOOD, HS_WARN or HS_BAD
     int disks, disks_ok, bsod, whea, devices;
-} HL;
+} HlData;
+
+// Built in HLT off-screen and swapped into HL.d whole, like the parts page.
+static struct {
+    volatile LONG ready, busy, again;
+    SRWLOCK lock;
+    HlData d;
+} HL = { 0, 0, 0, SRWLOCK_INIT };
+static HlData HLT;
 
 static HwCard *hl_card(u32 glyph, const WCHAR *cat)
 {
-    if (HL.ncards >= HL_CARDS) return NULL;
-    HwCard *c = &HL.card[HL.ncards++];
+    if (HLT.ncards >= HL_CARDS) return NULL;
+    HwCard *c = &HLT.card[HLT.ncards++];
     memset(c, 0, sizeof *c);
     c->glyph = glyph;
     wcopy(c->cat, countof(c->cat), cat);
@@ -37,7 +44,7 @@ static void hl_badge(HwCard *c, u8 state, const WCHAR *extra)
     c->state = state;
     const WCHAR *s = state == HS_BAD ? TR("Плохо", "Bad") : state == HS_WARN ? TR("Внимание", "Caution") : TR("Хорошо", "Good");
     wfmt(c->badge, countof(c->badge), L"%s%s%s", s, extra && extra[0] ? L" · " : L"", extra ? extra : L"");
-    if (state > HL.state) HL.state = state;
+    if (state > HLT.state) HLT.state = state;
 }
 
 static void row_state(HwCard *c, u8 state)
@@ -322,8 +329,8 @@ static void hl_disks(void)
                 hl_badge(c, HS_WARN, keep);
             }
         }
-        HL.disks++;
-        if (c->state == HS_GOOD) HL.disks_ok++;
+        HLT.disks++;
+        if (c->state == HS_GOOD) HLT.disks_ok++;
     }
 }
 
@@ -451,23 +458,23 @@ static void hl_stability(void)
     if (!c) return;
     c->state = HS_GOOD;
     FILETIME lb, lw, lwf, ls, ld;
-    HL.bsod = ev_count(L"Provider[@Name='Microsoft-Windows-WER-SystemErrorReporting'] and EventID=1001", &lb);
-    HL.whea = ev_count(L"Provider[@Name='Microsoft-Windows-WHEA-Logger']", &lw);
+    HLT.bsod = ev_count(L"Provider[@Name='Microsoft-Windows-WER-SystemErrorReporting'] and EventID=1001", &lb);
+    HLT.whea = ev_count(L"Provider[@Name='Microsoft-Windows-WHEA-Logger']", &lw);
     int whea_fatal = ev_count(L"Provider[@Name='Microsoft-Windows-WHEA-Logger'] and (Level=1 or Level=2)", &lwf);
     int shut = ev_count(L"Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=41", &ls);
     int disk = ev_count(DISK_EVENTS, &ld);
-    ev_row(c, TR("Синие экраны", "Blue screens"), HL.bsod, &lb, 3, HS_WARN);
-    ev_row(c, TR("Аппаратные ошибки WHEA", "WHEA hardware errors"), HL.whea, &lw, 0, whea_fatal ? HS_BAD : HS_WARN);
+    ev_row(c, TR("Синие экраны", "Blue screens"), HLT.bsod, &lb, 3, HS_WARN);
+    ev_row(c, TR("Аппаратные ошибки WHEA", "WHEA hardware errors"), HLT.whea, &lw, 0, whea_fatal ? HS_BAD : HS_WARN);
     ev_row(c, TR("Внезапные выключения", "Unexpected power-offs"), shut, &ls, 5, HS_WARN);
     ev_row(c, TR("Ошибки дисков", "Disk errors"), disk, &ld, 0, HS_WARN);
     if (c->state == HS_GOOD) {
         wcopy(c->head, countof(c->head), TR("Сбоев не было", "No crashes"));
         wcopy(c->sub, countof(c->sub), TR("Система работает стабильно", "The system runs stable"));
     } else {
-        int total = HL.bsod + HL.whea + shut + disk;
+        int total = HLT.bsod + HLT.whea + shut + disk;
         wfmt(c->head, countof(c->head), TR("Событий: %d", "Events: %d"), total);
         wcopy(c->sub, countof(c->sub),
-              HL.whea ? TR("WHEA - часто нестабильный разгон или память", "WHEA: often an unstable overclock or memory")
+              HLT.whea ? TR("WHEA - часто нестабильный разгон или память", "WHEA: often an unstable overclock or memory")
               : disk  ? TR("Какой диск - видно в его карточке", "The drive's card shows which one")
                       : TR("Подробности - в журнале «Система»", "Details: Event Viewer, System log"));
     }
@@ -524,7 +531,7 @@ static void hl_devices(void)
         n++;
     }
     if (set != INVALID_HANDLE_VALUE) SetupDiDestroyDeviceInfoList(set);
-    HL.devices = n;
+    HLT.devices = n;
     if (!n) {
         wcopy(c->head, countof(c->head), TR("Ошибок нет", "No problems"));
         wcopy(c->sub, countof(c->sub), TR("Все драйверы работают", "Every driver works"));
@@ -538,18 +545,18 @@ static void hl_devices(void)
 
 static void hl_stats(void)
 {
-    HwStat *s = HL.stat;
+    HwStat *s = HLT.stat;
     s[0].glyph = 0xEDA2;
-    wfmt(s[0].value, countof(s[0].value), L"%d/%d", HL.disks_ok, HL.disks);
+    wfmt(s[0].value, countof(s[0].value), L"%d/%d", HLT.disks_ok, HLT.disks);
     wcopy(s[0].label, countof(s[0].label), TR("дисков в норме", "drives healthy"));
     s[1].glyph = 0xEA39;
-    wfmt(s[1].value, countof(s[1].value), L"%d", HL.bsod);
+    wfmt(s[1].value, countof(s[1].value), L"%d", HLT.bsod);
     wcopy(s[1].label, countof(s[1].label), TR("синих экранов", "blue screens"));
     s[2].glyph = 0xE9D9;
-    wfmt(s[2].value, countof(s[2].value), L"%d", HL.whea);
+    wfmt(s[2].value, countof(s[2].value), L"%d", HLT.whea);
     wcopy(s[2].label, countof(s[2].label), TR("ошибок WHEA", "WHEA errors"));
     s[3].glyph = 0xE772;
-    wfmt(s[3].value, countof(s[3].value), L"%d", HL.devices);
+    wfmt(s[3].value, countof(s[3].value), L"%d", HLT.devices);
     wcopy(s[3].label, countof(s[3].label), TR("сбоев устройств", "device problems"));
 }
 
@@ -557,11 +564,8 @@ static DWORD WINAPI hl_thread(void *arg)
 {
     HWND notify = (HWND)arg;
 again:
-    memset(HL.card, 0, sizeof HL.card);
-    memset(HL.stat, 0, sizeof HL.stat);
-    HL.ncards = 0;
-    HL.state = HS_GOOD;
-    HL.disks = HL.disks_ok = HL.bsod = HL.whea = HL.devices = 0;
+    memset(&HLT, 0, sizeof HLT);
+    HLT.state = HS_GOOD;
     k_gb = TR("ГБ", "GB");
     k_tb = TR("ТБ", "TB");
     hl_disks();
@@ -570,6 +574,9 @@ again:
     hl_devices();
     hl_stats();
     if (InterlockedExchange(&HL.again, 0)) goto again;
+    AcquireSRWLockExclusive(&HL.lock);
+    HL.d = HLT;
+    ReleaseSRWLockExclusive(&HL.lock);
     InterlockedExchange(&HL.ready, 1);
     InterlockedExchange(&HL.busy, 0);
     PostMessageW(notify, WM_APP_HEALTH, 0, 0);
@@ -578,7 +585,6 @@ again:
 
 static void health_start(HWND notify)
 {
-    InterlockedExchange(&HL.ready, 0);
     if (InterlockedExchange(&HL.busy, 1)) {
         InterlockedExchange(&HL.again, 1);
         return;

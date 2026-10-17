@@ -12,7 +12,8 @@ N = 256 * SS
 
 TILE = (0x1E, 0x21, 0x28, 255)
 PIN = 0x2C5E3A
-BODY_TOP, BODY_BOTTOM = 0x3D8552, 0x27553A   # the only gradient: a soft light from above
+BODY = 0x2C5E3A
+CORE_SCALE = 1.12   # the four cores as one group, scaled from the chip's center
 CORE = 0x469C5C
 LIT = 0xA6F08E
 
@@ -46,19 +47,11 @@ def main():
         for box in ((o - 4, 2, o + 4, 14), (o - 4, 86, o + 4, 98), (2, o - 4, 14, o + 4), (86, o - 4, 98, o + 4)):
             d.rounded_rectangle(R(*box), radius=k(3), fill=rgb(PIN))
 
-    # the body: a vertical gradient through a rounded mask
-    mask = Image.new("L", (N, N), 0)
-    ImageDraw.Draw(mask).rounded_rectangle(R(14, 14, 86, 86), radius=k(14), fill=255)
-    top, bot = rgb(BODY_TOP), rgb(BODY_BOTTOM)
-    y0, y1 = U(14), U(86)
-    grad = Image.new("RGBA", (1, N))
-    for y in range(N):
-        t = min(1.0, max(0.0, (y - y0) / (y1 - y0)))
-        grad.putpixel((0, y), tuple(int(top[i] + (bot[i] - top[i]) * t) for i in range(4)))
-    img.paste(grad.resize((N, N)), (0, 0), mask)
+    d.rounded_rectangle(R(14, 14, 86, 86), radius=k(14), fill=rgb(BODY))
 
     for i, (x, y) in enumerate([(26, 26), (52, 26), (26, 52), (52, 52)]):
-        d.rounded_rectangle(R(x, y, x + 22, y + 22), radius=k(6), fill=rgb(LIT if i == 1 else CORE))
+        sx, sy = 50 + (x - 50) * CORE_SCALE, 50 + (y - 50) * CORE_SCALE
+        d.rounded_rectangle(R(sx, sy, sx + 22 * CORE_SCALE, sy + 22 * CORE_SCALE), radius=k(6 * CORE_SCALE), fill=rgb(LIT if i == 1 else CORE))
 
     out = img.resize((256, 256), Image.LANCZOS)
     out.save(os.path.join(RES, "logo.png"))

@@ -278,19 +278,13 @@ static void draw_logo(f32 x, f32 y, f32 sz)
         r_rect(ox + 2 * u, oy + (o - 4) * u, 12 * u, 8 * u, pin, 3 * u);
         r_rect(ox + 86 * u, oy + (o - 4) * u, 12 * u, 8 * u, pin, 3 * u);
     }
-    // The body's soft top-to-bottom gradient, one pixel row at a time through the clip.
-    f32 bx = ox + 14 * u, by = oy + 14 * u, bs = 72 * u, saved[4];
-    memcpy(saved, R.clip, sizeof saved);
-    for (int r = 0; r < (int)ceilf(bs); r++) {
-        f32 y0 = MAX(by + (f32)r, saved[1]), y1 = MIN(by + (f32)r + 1.f, saved[3]);
-        if (y1 <= y0) continue;
-        r_set_clip(saved[0], y0, saved[2], y1);
-        r_rect(bx, by, bs, bs, color_mix(RGBA(0x3D, 0x85, 0x52, 255), RGBA(0x27, 0x55, 0x3A, 255), ((f32)r + 0.5f) / bs), 14 * u);
-    }
-    memcpy(R.clip, saved, sizeof saved);
+    r_rect(ox + 14 * u, oy + 14 * u, 72 * u, 72 * u, pin, 14 * u);
     static const f32 cells[4][2] = { { 26, 26 }, { 52, 26 }, { 26, 52 }, { 52, 52 } };
+    // The four cores as one group, scaled up from the chip's center.
+    const f32 cs = 1.12f;
     for (int i = 0; i < 4; i++)
-        r_rect(ox + cells[i][0] * u, oy + cells[i][1] * u, 22 * u, 22 * u, i == 1 ? RGBA(0xA6, 0xF0, 0x8E, 255) : RGBA(0x46, 0x9C, 0x5C, 255), 6 * u);
+        r_rect(ox + (50 + (cells[i][0] - 50) * cs) * u, oy + (50 + (cells[i][1] - 50) * cs) * u, 22 * cs * u, 22 * cs * u,
+               i == 1 ? RGBA(0xA6, 0xF0, 0x8E, 255) : RGBA(0x46, 0x9C, 0x5C, 255), 6 * cs * u);
 }
 
 // --- layout --------------------------------------------------------------------------------------------------------

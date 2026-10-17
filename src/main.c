@@ -70,6 +70,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline_a, int show)
     A.row_hov_idx = -1;
     refresh_best();
     refresh_binding();
+    A.ban_t = A.bound_mask ? 1.f : 0.f;
+    A.ban_mask = A.bound_mask;
     for (int i = 0; i < A.nbest; i++)
         if (A.bound_mask == 1ull << A.best[i]) A.pick = i;
 

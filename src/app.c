@@ -58,7 +58,7 @@ enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIN
 enum { PG_HW, PG_HEALTH, PG_AFF, PG__COUNT };
 
 static const struct { u32 glyph; const WCHAR *ru, *en; } k_pages[PG__COUNT] = {
-    { 0xEC4E, L"Комплектующие ПК", L"PC components" },
+    { 0xE7F4, L"Комплектующие ПК", L"PC components" },
     { 0xE95E, L"Здоровье ПК", L"PC health" },
     { 0xE950, L"GPU Affinity", L"GPU Affinity" },
 };
@@ -91,6 +91,9 @@ static struct {
     int best[2], nbest, pick;
     u64 bound_mask;           // the cores the GPU is bound to, 0 when not bound
     bool svc_on;
+    Box ban;                  // the banner over the page while the GPU is bound
+    f32 ban_t;                // 0..1, the banner opening and closing
+    u64 ban_mask;             // what the banner shows, kept while it closes
     WCHAR note[160];          // a line under the bind button after binding or resetting
     bool note_bad;
 
@@ -374,7 +377,9 @@ static const WCHAR *tab_label(int i, WCHAR *buf, int cap)
 static void layout(void)
 {
     f32 x0 = content_x0(), x1 = content_x1(), cw = x1 - x0;
-    A.card = (Box){ x0, S(88), cw, S(158) };
+    // while bound, a banner across the top; it opens and closes with ban_t and pushes the rest down
+    A.ban = (Box){ x0, S(88), cw, S(76) };
+    A.card = (Box){ x0, S(88) + floorf((A.ban.h + S(14)) * ease_out_cubic(A.ban_t) + 0.5f), cw, S(158) };
     A.left_w = floorf(CLAMP(cw * 0.4f, S(290), S(420)));
     f32 lx = x0 + S(22);
     A.slider = (Box){ lx + S(2), A.card.y + S(60), A.left_w - S(4), S(1) };
@@ -385,12 +390,7 @@ static void layout(void)
     A.bind = (Box){ A.right_x, A.card.y + S(106), S(206), S(34) };
     // without results the picker button stands alone where the bind button goes
     A.manual = A.nbest ? (Box){ A.bind.x + A.bind.w + S(8), A.bind.y, S(132), S(34) } : (Box){ A.right_x, A.bind.y, S(196), S(34) };
-    {
-        // "Reset" sits right of the status line in the card's header row
-        f32 rr = x1 - S(22), fs = SC(12.5f);
-        f32 lw = text_width(FONT_TEXT_SEMIBOLD, fs, TR("Сбросить", "Reset"), -1);
-        A.reset = (Box){ rr - lw - S(8), A.card.y + S(30) - S(13), lw + S(16), S(26) };
-    }
+    A.reset = (Box){ x1 - S(22) - S(140), A.ban.y + (A.ban.h - S(34)) * 0.5f, S(140), S(34) };
 
     f32 ty = A.card.y + A.card.h + S(18);
     A.strip = (Box){ x0, ty, cw, S(44) };
@@ -497,6 +497,43 @@ static void draw_slider(void)
     r_rect(kx - d * 0.5f, cy - d * 0.5f, d, d, off ? t->faint : t->accent, d * 0.5f);
 }
 
+// The GPU's binding, across the top of the page: where it is, whether the service keeps it, and the way back.
+static void draw_bound_banner(void)
+{
+    if (A.ban_t <= 0.003f) return;
+    const Theme *t = &A.th;
+    const Colors *c = &A.c;
+    Box *b = &A.ban;
+    f32 base = R.opacity, k = ease_out_cubic(A.ban_t);
+    R.opacity = base * k;
+    // closing, it folds up under the card that slides over it
+    r_set_clip(b->x, b->y, b->x + b->w, A.card.y - S(14) + S(1));
+    r_rect(b->x, b->y, b->w, b->h, c->card, S(10));
+    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
+    bool on = A.svc_on || !A.bound_mask;
+    u32 col = on ? t->accent : t->warn;
+    f32 isz = S(44), cy = b->y + b->h * 0.5f, ix = b->x + S(18);
+    r_rect(ix, cy - isz * 0.5f, isz, isz, color_alpha(col, 0.16f), S(10));
+    text_draw_icon(on ? 0xE71B : 0xE7BA, SC(18), ix + isz * 0.5f, cy, col);
+    WCHAR mt[120], title[160];
+    mask_text(A.ban_mask, mt, countof(mt));
+    wfmt(title, countof(title), TR("Видеокарта привязана к %s", "The GPU is bound to %s"), mt);
+    f32 tx = ix + isz + S(16), tmax = A.reset.x - S(16) - tx;
+    text_draw_fit(FONT_TEXT_SEMIBOLD, SC(16), tx, baseline_for(FONT_TEXT_SEMIBOLD, SC(16), cy - S(10)), tmax, title, -1, t->text, false);
+    // the service's state, with a dot
+    const WCHAR *sub = on ? TR("Служба восстановления работает: после обновления драйвера привязка вернётся сама",
+                               "The recovery service is running: the binding comes back by itself after a driver update")
+                          : TR("Служба восстановления не запущена: после обновления драйвера привязка может пропасть",
+                               "The recovery service isn't running: a driver update can drop the binding");
+    f32 dot = S(7), sy = cy + S(12);
+    r_rect(tx, floorf(sy - dot * 0.5f), dot, dot, on ? t->good : t->warn, dot * 0.5f);
+    text_draw_fit(FONT_TEXT, SC(12.5f), tx + dot + S(8), baseline_for(FONT_TEXT, SC(12.5f), sy), tmax - dot - S(8), sub, -1, t->dim, false);
+    draw_button(&A.reset, TR("Сбросить", "Reset"), 0xE777, BTN_NEUTRAL, A.hv[HV_RESET], A.press.type == HT_RESET && A.hover.type == HT_RESET,
+                g_task_busy != 0 || B.running || !A.bound_mask);
+    r_set_clip(0, 0, (f32)A.W, (f32)A.H);
+    R.opacity = base;
+}
+
 static void draw_controls(void)
 {
     const Theme *t = &A.th;
@@ -565,20 +602,6 @@ static void draw_controls(void)
 
     // right: the two best cores and the bind button
     text_draw(FONT_TEXT, fs, rx, baseline_for(FONT_TEXT, fs, top), TR("Лучшие ядра", "Best cores"), -1, t->text);
-    if (A.bound_mask) {
-        WCHAR s2[160], mt[120];
-        mask_text(A.bound_mask, mt, countof(mt));
-        wfmt(s2, countof(s2), A.svc_on ? TR("Привязано к %s", "Bound to %s") : TR("%s · служба не запущена", "%s · service stopped"), mt);
-        f32 sfs = SC(12.5f), dot = S(8), lr = A.reset.x - S(6);
-        bool busy = g_task_busy != 0;
-        f32 rh = A.hv[HV_RESET];
-        if (rh > 0 && !busy) r_rect(A.reset.x, A.reset.y, A.reset.w, A.reset.h, color_alpha(c->ctl_hover, rh), S(6));
-        text_center(FONT_TEXT_SEMIBOLD, sfs, A.reset.x + A.reset.w * 0.5f, top, TR("Сбросить", "Reset"),
-                    busy ? t->faint : color_mix(t->accent, t->text, rh * 0.3f));
-        f32 sw = MIN(text_width(FONT_TEXT, sfs, s2, -1), lr - rx - S(140));
-        text_draw_fit(FONT_TEXT, sfs, lr - sw, baseline_for(FONT_TEXT, sfs, top), sw + 1, s2, -1, t->dim, false);
-        r_rect(lr - sw - S(8) - dot, floorf(top - dot * 0.5f), dot, dot, A.svc_on ? t->good : t->warn, dot * 0.5f);
-    }
     if (B.error[0]) {
         text_draw_fit(FONT_TEXT, SC(12.5f), rx, baseline_for(FONT_TEXT, SC(12.5f), cd->y + S(56)), rr - rx, B.error, -1, t->danger, false);
     }
@@ -1219,6 +1242,7 @@ static void draw_all(void)
         const WCHAR *gpu = A.ngpu ? A.gpu[0].name : TR("Видеокарта не найдена", "No GPU found");
         wfmt(sub, countof(sub), TR("%s · %s, %d потоков", "%s · %s, %d threads"), gpu, A.cpu.name[0] ? A.cpu.name : L"CPU", A.cpu.count);
         text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100), sub, -1, t->dim, false);
+        draw_bound_banner();
         draw_controls();
         draw_table();
     }
@@ -1248,7 +1272,7 @@ static void draw_all(void)
 
 static int row_at(f32 y)
 {
-    if (A.page != PG_AFF || !in_b(&A.rows, (f32)A.mx, y)) return -1;
+    if (A.page != PG_AFF || A.modal || A.picker || D.open || !in_b(&A.rows, (f32)A.mx, y)) return -1;
     int i = (int)floorf((y - A.rows.y + A.scroll) / S(38));
     return i >= 0 && i < B.ncpu ? i : -1;
 }
@@ -1285,6 +1309,8 @@ static bool animate(f32 dt)
         anim |= spring_step(&A.tab_w, &wv, tb->w, 30.f, dt);
     }
     anim |= approach(&A.pick_t, (f32)A.pick, 20.f, dt);
+    if (A.bound_mask) A.ban_mask = A.bound_mask;
+    anim |= approach(&A.ban_t, A.bound_mask ? 1.f : 0.f, 12.f, dt);
     A.prog = bench_progress();
     if (A.page_t < 1.f) {
         A.page_t = g_reduced_motion ? 1.f : MIN(1.f, A.page_t + dt / 0.28f);
@@ -1298,7 +1324,7 @@ static bool animate(f32 dt)
     anim |= approach(&A.row_hov, rh >= 0 ? 1.f : 0.f, 22.f, dt);
     A.scroll_target = CLAMP(A.scroll_target, 0.f, max_scroll());
     anim |= spring_step(&A.scroll, &A.scroll_v, A.scroll_target, 24.f, dt);
-    bool sb_on = max_scroll() > 0 && in_b(&A.body, (f32)A.mx, (f32)A.my);
+    bool sb_on = max_scroll() > 0 && !A.modal && !A.picker && !D.open && in_b(&A.body, (f32)A.mx, (f32)A.my);
     anim |= approach(&A.sb_t, sb_on ? 1.f : 0.f, sb_on ? 20.f : 7.f, dt);
     anim |= approach(&A.modal_t, A.modal ? 1.f : 0.f, A.modal ? 14.f : 18.f, dt);
     anim |= approach(&A.picker_t, A.picker ? 1.f : 0.f, A.picker ? 14.f : 18.f, dt);
@@ -1703,7 +1729,7 @@ static LRESULT nc_hit(HWND h, LPARAM lp)
         if (in_b(&r, x, y)) return HTCLIENT;
     }
     if (A.modal || A.picker || D.open) return HTCLIENT;
-    if (y < A.card.y - S(8) && x >= sb_x() + sb_w()) return HTCAPTION;
+    if (y < S(80) && x >= sb_x() + sb_w()) return HTCAPTION;
     if (x < sb_x() + sb_w() && y < sb_x() + S(72)) return HTCAPTION;
     return HTCLIENT;
 }
@@ -1797,6 +1823,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         mouse_up(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         return 0;
     case WM_MOUSEWHEEL:
+        if (A.modal || A.picker) return 0;
         if (D.open) {
             D.scroll_target = CLAMP(D.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(64), 0.f, MAX(0.f, D.content_h - D.view_h));
             invalidate();

@@ -4,7 +4,7 @@
 #define HW_TOP 88.f        // the page content starts under the title, in DIPs
 #define HW_ROW_H 34.f
 #define HW_HEAD_H 86.f
-#define HW_SCORE_H 244.f
+#define HW_SCORE_H 224.f
 
 // Light green into the app's accent, along the gauge (0..1).
 static u32 score_color(f32 p)
@@ -69,10 +69,8 @@ static void draw_hw_score(const Box *b)
     // right: what the score means, then a tile per part
     f32 x = cx + r + S(52), x1 = b->x + b->w - S(24), y = b->y + S(24);
     text_draw(FONT_TEXT_SEMIBOLD, SC(17), x, baseline_for(FONT_TEXT_SEMIBOLD, SC(17), y + S(4)), TR("Оценка ПК", "PC score"), -1, t->text);
-    text_wrap(FONT_TEXT, SC(12.5f), x, baseline_for(FONT_TEXT, SC(12.5f), y + S(30)), x1 - x, S(18),
-              TR("Сравнение с топовым игровым ПК сегодня, это 100. Считается по видеокарте, процессору, памяти и системному диску.",
-                 "Compared with a top gaming PC of today, which is 100. Counted from the graphics card, processor, memory and system drive."),
-              t->dim, true);
+    text_draw_fit(FONT_TEXT, SC(12.5f), x, baseline_for(FONT_TEXT, SC(12.5f), y + S(30)), x1 - x,
+                  TR("Сравнение с топовым игровым ПК сегодня, это 100", "Compared with a top gaming PC of today, which is 100"), -1, t->dim, false);
     static const struct { u32 glyph; const WCHAR *ru, *en; } parts[SC__COUNT] = {
         { 0xF211, L"Видеокарта", L"Graphics" }, { 0xEEA1, L"Процессор", L"Processor" },
         { 0xE964, L"Память", L"Memory" },       { 0xEDA2, L"Системный диск", L"System drive" },

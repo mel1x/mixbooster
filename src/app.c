@@ -766,10 +766,12 @@ static int modal_items(ModalItem *it, WCHAR *eta, int cap)
          TR("Тест займёт %s. Экран будет гаснуть и уходить в полноэкранный режим - это перезапуск драйвера видеокарты на каждом ядре.",
             "The test takes %s. The screen goes black and fullscreen now and then: the GPU driver restarts for every core."),
          d);
-    it[0] = (ModalItem){ 0xE7BA, TR("Не трогайте ПК во время теста", "Leave the PC alone during the test"), eta };
-    it[1] = (ModalItem){ 0xE9D9, TR("Закройте всё, что нагружает ПК", "Close everything that loads the PC"),
-                         TR("Игры, браузер, лаунчеры, оверлеи, запись экрана, торренты - любая фоновая нагрузка на процессор или видеокарту исказит результаты.",
-                            "Games, the browser, launchers, overlays, screen recording, torrents: any background load on the CPU or GPU skews the results.") };
+    it[0] = (ModalItem){ 0xE7F4, TR("Не трогайте ПК во время теста", "Leave the PC alone during the test"), eta };
+    it[1] = (ModalItem){ 0xE9D9, TR("Закройте лишние программы", "Close what you don't always run"),
+                         TR("Игры, браузер, лаунчеры, запись экрана, торренты - всё, что нагружает процессор или видеокарту. А то, что работает у вас "
+                            "постоянно, например Wallpaper Engine, лучше оставить: так тест пройдёт в привычных для ПК условиях.",
+                            "Games, the browser, launchers, screen recording, torrents: anything that loads the CPU or GPU. What always runs on your "
+                            "PC, like Wallpaper Engine, is better left on: the test then runs in the PC's usual conditions.") };
     it[2] = (ModalItem){ 0, TR("Нужен ПК - нажмите F4", "Need the PC? Press F4"),
                          TR("Тест остановится в любой момент, даже поверх полноэкранного окна, а видеокарта вернётся к прежней привязке.",
                             "The test stops at any moment, even over the fullscreen window, and the GPU goes back to its previous binding.") };

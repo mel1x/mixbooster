@@ -322,7 +322,8 @@ static void winbtn_box(int i, Box *b)
     b->y = 0;
 }
 
-static void donate_box(Box *b)
+// The bottom of the sidebar: "Support the author", and under it the language switch.
+static void lang_box(Box *b)
 {
     b->x = sb_x() + S(8);
     b->w = sb_w() - S(16);
@@ -330,10 +331,10 @@ static void donate_box(Box *b)
     b->y = (f32)A.H - sb_x() - S(8) - b->h;
 }
 
-static void lang_box(Box *b)
+static void donate_box(Box *b)
 {
-    donate_box(b);
-    b->y -= b->h + S(4);
+    lang_box(b);
+    b->y -= b->h + S(6);
 }
 
 static void nav_box(int i, Box *b)
@@ -446,7 +447,7 @@ static void draw_sidebar(void)
         u32 col = sel ? t->text : hov ? color_mix(t->dim, t->text, 0.6f) : t->dim;
         text_center(sel ? FONT_TEXT_SEMIBOLD : FONT_TEXT, SC(13), lb.x + half * (f32)k + half * 0.5f, lcy, k ? L"English" : L"Русский", col);
     }
-    text_draw(FONT_TEXT, SC(12), x + S(18), floorf(lb.y - S(12)), TR("Версия " MB_VER_STR, "Version " MB_VER_STR), -1, t->faint);
+    text_draw(FONT_TEXT, SC(12), x + S(18), floorf(d.y - S(12)), TR("Версия " MB_VER_STR, "Version " MB_VER_STR), -1, t->faint);
 }
 
 static void draw_slider(void)

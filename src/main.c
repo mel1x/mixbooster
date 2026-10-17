@@ -4,6 +4,7 @@
 #include "render.c"
 #include "font.c"
 #include "gpu.c"
+#include "hw.c"
 #include "bench.c"
 #include "service.c"
 #include "app.c"

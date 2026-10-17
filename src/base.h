@@ -28,6 +28,7 @@
 #undef NTDDI_VERSION
 #define NTDDI_VERSION 0x0A000006
 
+#include <winsock2.h>  // before windows.h, for the network adapters in hw.c
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
@@ -335,4 +336,5 @@ enum {
     WM_APP_BENCH = WM_APP + 1,  // progress or a new result from the benchmark thread
     WM_APP_BENCH_DONE,
     WM_APP_TASK_DONE,           // binding or resetting finished; wp = 1 on success
+    WM_APP_HW,                  // the PC components are read
 };

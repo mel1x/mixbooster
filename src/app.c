@@ -41,6 +41,14 @@ enum {
 // Hover animation slots.
 enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
 
+// The sidebar pages, top to bottom.
+enum { PG_HW, PG_AFF, PG__COUNT };
+
+static const struct { u32 glyph; const WCHAR *ru, *en; } k_pages[PG__COUNT] = {
+    { 0xEC4E, L"Комплектующие ПК", L"PC components" },
+    { 0xE950, L"GPU Affinity", L"GPU Affinity" },
+};
+
 typedef struct Hit {
     int type, idx;
 } Hit;
@@ -80,6 +88,9 @@ static struct {
     f32 pick_t;               // 0..1 between the two pick tiles
     f32 prog;                 // the progress bar, eased
     f32 page_t;
+    int page;                 // PG_*
+    f32 nav_y, nav_v, nav_hov[PG__COUNT];
+    f32 hw_scroll, hw_scroll_target, hw_scroll_v, hw_content_h, hw_sb_t;
     bool modal;               // the dialog before the test
     f32 modal_t;
     Box m_panel, m_ok, m_cancel;
@@ -228,6 +239,7 @@ static void fmt_duration(WCHAR *out, int cap, f64 sec)
 }
 
 enum { BTN_ACCENT, BTN_NEUTRAL };
+#define GLYPH_PLAY 0xF5B0  // PlaySolid
 
 static void draw_button(const Box *b, const WCHAR *label, u32 glyph, int style, f32 hov, bool down, bool disabled)
 {
@@ -250,7 +262,8 @@ static void draw_button(const Box *b, const WCHAR *label, u32 glyph, int style, 
     f32 fs = SC(13.5f), mid = b->y + b->h * 0.5f;
     f32 lw = text_width(FONT_TEXT, fs, label, -1), gw = glyph ? S(14) + S(8) : 0;
     f32 x = floorf(b->x + (b->w - lw - gw) * 0.5f + 0.5f);
-    if (glyph) text_draw_icon(glyph, SC(13), x + S(7), mid, fg);
+    // the solid play triangle stays white on the accent
+    if (glyph) text_draw_icon(glyph, SC(13), x + S(7), mid, glyph == GLYPH_PLAY && !disabled ? RGBA(255, 255, 255, 255) : fg);
     text_draw(FONT_TEXT, fs, x + gw, baseline_for(FONT_TEXT, fs, mid), label, -1, fg);
 }
 
@@ -303,10 +316,10 @@ static void donate_box(Box *b)
     b->y = (f32)A.H - sb_x() - S(8) - b->h;
 }
 
-static void nav_box(Box *b)
+static void nav_box(int i, Box *b)
 {
     b->x = sb_x() + S(8);
-    b->y = sb_x() + S(78);
+    b->y = sb_x() + S(78) + S(38) * (f32)i;
     b->w = sb_w() - S(16);
     b->h = S(36);
 }
@@ -367,14 +380,23 @@ static void draw_sidebar(void)
     text_draw_fit(FONT_TEXT, SC(12.5f), nx, floorf(ty + S(33)), x + w - nx - S(10), TR("Оптимизация ПК", "PC tuning"), -1, t->dim, false);
 
     Box n;
-    nav_box(&n);
-    r_rect(n.x, n.y, n.w, n.h, c->nav_sel, S(8));
-    r_rect_ex(n.x, n.y, n.w, n.h, c->nav_sel_border, S(8), 1.f, 0);
-    r_rect(n.x + S(4), floorf(n.y + (n.h - S(16)) * 0.5f), S(3), S(16), t->accent, S(1.5f));
-    f32 cy = n.y + n.h * 0.5f, ix = n.x + S(10), isz = S(20), fs = SC(14);
-    text_draw_icon(0xE950, SC(15), ix + isz * 0.5f, cy, t->text);
-    text_draw_fit(FONT_TEXT_SEMIBOLD, fs, ix + isz + S(12), baseline_for(FONT_TEXT, fs, cy), n.x + n.w - ix - isz - S(18), L"GPU Affinity", -1,
-                  t->text, false);
+    nav_box(A.page, &n);
+    // the selection slides between the pages; its accent bar stretches a little while it moves
+    f32 py = floorf(A.nav_y + 0.5f);
+    r_rect(n.x, py, n.w, n.h, c->nav_sel, S(8));
+    r_rect_ex(n.x, py, n.w, n.h, c->nav_sel_border, S(8), 1.f, 0);
+    f32 bh = floorf(MIN(S(16) + fabsf(A.nav_v) * 0.02f, n.h - S(8)) + 0.5f);
+    r_rect(n.x + S(4), floorf(py + (n.h - bh) * 0.5f + 0.5f), S(3), bh, t->accent, S(1.5f));
+    f32 isz = S(20), fs = SC(14);
+    for (int i = 0; i < PG__COUNT; i++) {
+        nav_box(i, &n);
+        bool sel = i == A.page;
+        if (!sel && A.nav_hov[i] > 0) r_rect(n.x, n.y, n.w, n.h, color_alpha(c->nav_hover, A.nav_hov[i]), S(8));
+        f32 cy = n.y + n.h * 0.5f, ix = n.x + S(10);
+        text_draw_icon(k_pages[i].glyph, SC(15), ix + isz * 0.5f, cy, sel ? t->text : color_mix(t->faint, t->dim, A.nav_hov[i]));
+        text_draw_fit(sel ? FONT_TEXT_SEMIBOLD : FONT_TEXT, fs, ix + isz + S(12), baseline_for(FONT_TEXT, fs, cy), n.x + n.w - ix - isz - S(18),
+                      g_lang_ru ? k_pages[i].ru : k_pages[i].en, -1, sel ? t->text : color_mix(t->dim, t->text, A.nav_hov[i]), false);
+    }
 
     Box d;
     donate_box(&d);
@@ -431,7 +453,7 @@ static void draw_controls(void)
     bool run = B.running != 0, stopping = run && B.cancel;
     Hit *h = &A.hover;
     draw_button(&A.start, run ? (stopping ? TR("Останавливаю…", "Stopping…") : TR("Остановить · F4", "Stop · F4")) : TR("Начать тест", "Start test"),
-                run ? 0xE71A : 0xE768, run ? BTN_NEUTRAL : BTN_ACCENT, A.hv[HV_START], A.press.type == HT_START && h->type == HT_START,
+                run ? 0xE71A : GLYPH_PLAY, run ? BTN_NEUTRAL : BTN_ACCENT, A.hv[HV_START], A.press.type == HT_START && h->type == HT_START,
                 stopping || g_task_busy);
     if (!run) {
         f64 step = BENCH_SETTLE_SEC + BENCH_WARMUP_SEC + BENCH_MEASURE_SEC;
@@ -834,7 +856,7 @@ static void modal_pass(bool draw)
     r_rect(x + S(1), A.m_ok.y - S(18), w - S(2), 1, t->sep, 0);
     Hit *hv = &A.hover;
     draw_button(&A.m_cancel, TR("Отмена", "Cancel"), 0, BTN_NEUTRAL, A.hv[HV_MCANCEL], A.press.type == HT_MCANCEL && hv->type == HT_MCANCEL, false);
-    draw_button(&A.m_ok, TR("Начать тест", "Start test"), 0xE768, BTN_ACCENT, A.hv[HV_MOK], A.press.type == HT_MOK && hv->type == HT_MOK, false);
+    draw_button(&A.m_ok, TR("Начать тест", "Start test"), GLYPH_PLAY, BTN_ACCENT, A.hv[HV_MOK], A.press.type == HT_MOK && hv->type == HT_MOK, false);
     R.opacity = 1.f;
 }
 
@@ -858,6 +880,7 @@ static void modal_close(bool start)
 }
 
 #include "donate.c"
+#include "hwpage.c"
 
 static void draw_all(void)
 {
@@ -869,13 +892,23 @@ static void draw_all(void)
     f32 pe = ease_out_cubic(A.page_t), rise = floorf((1.f - pe) * S(10) + 0.5f);
     R.opacity = pe;
     f32 x0 = content_x0();
-    text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, L"GPU Affinity", -1, t->text);
     WCHAR sub[300];
-    const WCHAR *gpu = A.ngpu ? A.gpu[0].name : TR("Видеокарта не найдена", "No GPU found");
-    wfmt(sub, countof(sub), TR("%s · %s, %d потоков", "%s · %s, %d threads"), gpu, A.cpu.name[0] ? A.cpu.name : L"CPU", A.cpu.count);
-    text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100), sub, -1, t->dim, false);
-    draw_controls();
-    draw_table();
+    if (A.page == PG_HW) {
+        text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, TR("Комплектующие ПК", "PC components"), -1, t->text);
+        if (HW.ready) {
+            const HwCard *os = &HW.card[HWC_OS];
+            wfmt(sub, countof(sub), L"%s · %s", os->nrows ? os->rows[0].v : L"PC", os->head);
+            text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100), sub, -1, t->dim, false);
+        }
+        draw_hw_page(rise);
+    } else {
+        text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, L"GPU Affinity", -1, t->text);
+        const WCHAR *gpu = A.ngpu ? A.gpu[0].name : TR("Видеокарта не найдена", "No GPU found");
+        wfmt(sub, countof(sub), TR("%s · %s, %d потоков", "%s · %s, %d threads"), gpu, A.cpu.name[0] ? A.cpu.name : L"CPU", A.cpu.count);
+        text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100), sub, -1, t->dim, false);
+        draw_controls();
+        draw_table();
+    }
     R.opacity = 1.f;
     if (A.modal || A.modal_t > 0) modal_pass(true);
     if (D.open) draw_donate();
@@ -901,7 +934,7 @@ static void draw_all(void)
 
 static int row_at(f32 y)
 {
-    if (!in_b(&A.rows, (f32)A.mx, y)) return -1;
+    if (A.page != PG_AFF || !in_b(&A.rows, (f32)A.mx, y)) return -1;
     int i = (int)floorf((y - A.rows.y + A.scroll) / S(38));
     return i >= 0 && i < B.ncpu ? i : -1;
 }
@@ -945,6 +978,14 @@ static bool animate(f32 dt)
     bool sb_on = max_scroll() > 0 && in_b(&A.body, (f32)A.mx, (f32)A.my);
     anim |= approach(&A.sb_t, sb_on ? 1.f : 0.f, sb_on ? 20.f : 7.f, dt);
     anim |= approach(&A.modal_t, A.modal ? 1.f : 0.f, A.modal ? 14.f : 18.f, dt);
+    Box nb;
+    nav_box(A.page, &nb);
+    anim |= spring_step(&A.nav_y, &A.nav_v, nb.y, 26.f, dt);
+    for (int i = 0; i < PG__COUNT; i++) anim |= approach(&A.nav_hov[i], A.hover.type == HT_NAV && A.hover.idx == i ? 1.f : 0.f, 20.f, dt);
+    A.hw_scroll_target = CLAMP(A.hw_scroll_target, 0.f, hw_max_scroll());
+    anim |= spring_step(&A.hw_scroll, &A.hw_scroll_v, A.hw_scroll_target, 24.f, dt);
+    bool hw_sb = A.page == PG_HW && hw_max_scroll() > 0 && A.mx >= content_x0();
+    anim |= approach(&A.hw_sb_t, hw_sb ? 1.f : 0.f, hw_sb ? 20.f : 7.f, dt);
     anim |= don_animate(dt);
     anim |= confetti_animate(dt);
     return anim;
@@ -1018,11 +1059,11 @@ static Hit hit_test(int mx, int my)
         h.type = HT_DONATE;
         return h;
     }
-    nav_box(&n);
-    if (in_b(&n, x, y)) {
-        h.type = HT_NAV;
-        return h;
+    for (int i = 0; i < PG__COUNT; i++) {
+        nav_box(i, &n);
+        if (in_b(&n, x, y)) return (Hit){ HT_NAV, i };
     }
+    if (A.page != PG_AFF) return h;
     Box sl = { A.slider.x - S(12), A.slider.y - S(14), A.slider.w + S(24), S(28) };
     if (!B.running && in_b(&sl, x, y)) h.type = HT_SLIDER;
     else if (in_b(&A.start, x, y)) h.type = HT_START;
@@ -1046,6 +1087,15 @@ static void slider_set(int mx)
         A.runs = v;
         invalidate();
     }
+}
+
+static void set_page(int i)
+{
+    if (i == A.page || i < 0 || i >= PG__COUNT) return;
+    A.page = i;
+    A.page_t = 0;
+    A.dragging = false;
+    invalidate();
 }
 
 static void set_tab(int i)
@@ -1092,6 +1142,7 @@ static void mouse_down(int mx, int my)
     }
     switch (h.type) {
     case HT_DONATE: don_open(); break;
+    case HT_NAV: set_page(h.idx); break;
     case HT_SLIDER:
         A.dragging = true;
         slider_set(mx);
@@ -1151,6 +1202,18 @@ static void key_down(UINT vk)
     if (A.modal) {
         if (vk == VK_ESCAPE) modal_close(false);
         else if (vk == VK_RETURN) modal_close(true);
+        return;
+    }
+    if (ctrl && (vk == VK_PRIOR || vk == VK_NEXT)) {
+        set_page((A.page + (vk == VK_PRIOR ? PG__COUNT - 1 : 1)) % PG__COUNT);
+        return;
+    }
+    if (A.page == PG_HW) {
+        if (vk == VK_UP || vk == VK_DOWN) A.hw_scroll_target += vk == VK_UP ? -S(60) : S(60);
+        if (vk == VK_PRIOR || vk == VK_NEXT) A.hw_scroll_target += (vk == VK_PRIOR ? -1.f : 1.f) * hw_view_h() * 0.8f;
+        if (vk == VK_HOME) A.hw_scroll_target = 0;
+        if (vk == VK_END) A.hw_scroll_target = hw_max_scroll();
+        invalidate();
         return;
     }
     if (ctrl && vk == VK_TAB && A.ntabs) {
@@ -1294,7 +1357,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             invalidate();
             return 0;
         }
-        A.scroll_target = CLAMP(A.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(76), 0.f, max_scroll());
+        if (A.page == PG_HW) A.hw_scroll_target = CLAMP(A.hw_scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(90), 0.f, hw_max_scroll());
+        else A.scroll_target = CLAMP(A.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(76), 0.f, max_scroll());
         invalidate();
         return 0;
     case WM_HOTKEY:
@@ -1313,6 +1377,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         invalidate();
         return 0;
     case WM_APP_BENCH:
+    case WM_APP_HW:
         invalidate();
         return 0;
     case WM_APP_BENCH_DONE:
@@ -1325,6 +1390,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         refresh_best();
         refresh_binding();
         A.tab = has_results() ? 0 : A.tab;
+        set_page(PG_AFF);
         // The test ran fullscreen; bring the results up.
         if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
         SetForegroundWindow(h);
@@ -1437,6 +1503,10 @@ static bool app_open(void)
     }
     A.pick_t = 0;
     A.page_t = 0;
+    Box nb;
+    nav_box(A.page, &nb);
+    A.nav_y = nb.y;
+    hw_start(A.hwnd);
     A.last_frame = time_now();
     A.dirty = true;
     A.ready = true;

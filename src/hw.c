@@ -33,7 +33,7 @@ typedef struct HwStat {
 } HwStat;
 
 static struct {
-    volatile LONG ready;
+    volatile LONG ready, busy, again;  // again: the language changed while reading, read once more
     HwCard card[HWC__COUNT];
     HwStat stat[4];
 } HW;
@@ -703,6 +703,11 @@ static void hw_os(void)
 static DWORD WINAPI hw_thread(void *arg)
 {
     HWND notify = (HWND)arg;
+again:
+    // everything is rebuilt: the texts are in the current language
+    memset(HW.card, 0, sizeof HW.card);
+    memset(HW.stat, 0, sizeof HW.stat);
+    memset(&SMB, 0, sizeof SMB);
     k_gb = TR("ГБ", "GB");
     k_tb = TR("ТБ", "TB");
     CpuInfo ci;
@@ -716,13 +721,21 @@ static DWORD WINAPI hw_thread(void *arg)
     hw_displays();
     hw_net();
     hw_os();
+    if (InterlockedExchange(&HW.again, 0)) goto again;
     InterlockedExchange(&HW.ready, 1);
+    InterlockedExchange(&HW.busy, 0);
     PostMessageW(notify, WM_APP_HW, 0, 0);
     return 0;
 }
 
 static void hw_start(HWND notify)
 {
+    InterlockedExchange(&HW.ready, 0);
+    if (InterlockedExchange(&HW.busy, 1)) {
+        InterlockedExchange(&HW.again, 1);
+        return;
+    }
     HANDLE t = CreateThread(NULL, 0, hw_thread, notify, 0, NULL);
     if (t) CloseHandle(t);
+    else InterlockedExchange(&HW.busy, 0);
 }

@@ -30,7 +30,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline_a, int show)
     WCHAR **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv && argc > 1 && !_wcsicmp(argv[1], L"--service")) return svc_run();
 
-    g_lang_ru = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_RUSSIAN;
+    lang_load();
     typedef BOOL (WINAPI *PFN_SetDpiCtx)(HANDLE);
     PFN_SetDpiCtx set_dpi = (PFN_SetDpiCtx)(void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext");
     if (set_dpi) set_dpi((HANDLE)-4 /*PER_MONITOR_AWARE_V2*/);

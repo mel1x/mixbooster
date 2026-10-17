@@ -86,6 +86,30 @@ typedef double   f64;
 static bool g_lang_ru;
 #define TR(ru, en) (g_lang_ru ? L##ru : L##en)
 
+// HKCU\Software\MixBooster\Language: 0 Russian, 1 English. Unset on the first start: Russian for a Russian
+// Windows, English for any other, and that choice is saved.
+#define MB_USER_KEY L"Software\\MixBooster"
+
+static void lang_save(void)
+{
+    HKEY k;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, MB_USER_KEY, 0, NULL, 0, KEY_SET_VALUE, NULL, &k, NULL) != ERROR_SUCCESS) return;
+    DWORD v = g_lang_ru ? 0 : 1;
+    RegSetValueExW(k, L"Language", 0, REG_DWORD, (const BYTE *)&v, sizeof v);
+    RegCloseKey(k);
+}
+
+static void lang_load(void)
+{
+    DWORD v = 0, sz = sizeof v;
+    if (RegGetValueW(HKEY_CURRENT_USER, MB_USER_KEY, L"Language", RRF_RT_REG_DWORD, NULL, &v, &sz) == ERROR_SUCCESS) {
+        g_lang_ru = v == 0;
+        return;
+    }
+    g_lang_ru = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_RUSSIAN;
+    lang_save();
+}
+
 // Follows "Animation effects" in the Windows settings; render.c reads it.
 static bool g_reduced_motion;
 

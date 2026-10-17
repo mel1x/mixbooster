@@ -36,10 +36,11 @@ enum {
     HT_MOUT,
     HT_DONATE,    // the sidebar button
     HT_DON,       // the donation panel; idx: a wallet or DON_*
+    HT_LANG,      // the language switch in the sidebar
 };
 
 // Hover animation slots.
-enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
+enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_LANG, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
 
 // The sidebar pages, top to bottom.
 enum { PG_HW, PG_AFF, PG__COUNT };
@@ -262,8 +263,8 @@ static void draw_button(const Box *b, const WCHAR *label, u32 glyph, int style, 
     f32 fs = SC(13.5f), mid = b->y + b->h * 0.5f;
     f32 lw = text_width(FONT_TEXT, fs, label, -1), gw = glyph ? S(14) + S(8) : 0;
     f32 x = floorf(b->x + (b->w - lw - gw) * 0.5f + 0.5f);
-    // the solid play triangle stays white on the accent
-    if (glyph) text_draw_icon(glyph, SC(13), x + S(7), mid, glyph == GLYPH_PLAY && !disabled ? RGBA(255, 255, 255, 255) : fg);
+    // the solid play triangle is black on the accent
+    if (glyph) text_draw_icon(glyph, SC(13), x + S(7), mid, glyph == GLYPH_PLAY && !disabled ? RGBA(0, 0, 0, 255) : fg);
     text_draw(FONT_TEXT, fs, x + gw, baseline_for(FONT_TEXT, fs, mid), label, -1, fg);
 }
 
@@ -314,6 +315,12 @@ static void donate_box(Box *b)
     b->w = sb_w() - S(16);
     b->h = S(36);
     b->y = (f32)A.H - sb_x() - S(8) - b->h;
+}
+
+static void lang_box(Box *b)
+{
+    donate_box(b);
+    b->y -= b->h + S(4);
 }
 
 static void nav_box(int i, Box *b)
@@ -405,7 +412,16 @@ static void draw_sidebar(void)
     text_draw_icon(0xEB51, SC(15), d.x + S(10) + isz * 0.5f, dcy, color_mix(t->faint, t->dim, hv));
     text_draw_fit(FONT_TEXT, fs, d.x + S(10) + isz + S(12), baseline_for(FONT_TEXT, fs, dcy), d.w - isz - S(32), TR("Поддержать автора", "Support the author"),
                   -1, color_mix(t->dim, t->text, hv), false);
-    text_draw(FONT_TEXT, SC(12), x + S(18), floorf(d.y - S(12)), TR("Версия " MB_VER_STR, "Version " MB_VER_STR), -1, t->faint);
+    Box lb;
+    lang_box(&lb);
+    f32 lh = A.hv[HV_LANG], lcy = lb.y + lb.h * 0.5f;
+    if (lh > 0) r_rect(lb.x, lb.y, lb.w, lb.h, color_alpha(c->nav_hover, lh), S(8));
+    text_draw_icon(0xE774, SC(15), lb.x + S(10) + isz * 0.5f, lcy, color_mix(t->faint, t->dim, lh));
+    // the current language; a click switches to the other one, shown on the right
+    text_draw(FONT_TEXT, fs, lb.x + S(10) + isz + S(12), baseline_for(FONT_TEXT, fs, lcy), g_lang_ru ? L"Русский" : L"English", -1,
+              color_mix(t->dim, t->text, lh));
+    text_right(FONT_TEXT, SC(12), lb.x + lb.w - S(12), lcy, g_lang_ru ? L"EN" : L"RU", color_mix(t->faint, t->dim, lh));
+    text_draw(FONT_TEXT, SC(12), x + S(18), floorf(lb.y - S(12)), TR("Версия " MB_VER_STR, "Version " MB_VER_STR), -1, t->faint);
 }
 
 static void draw_slider(void)
@@ -950,6 +966,7 @@ static bool animate(f32 dt)
         else if (i == HV_PICK0 || i == HV_PICK1) on = A.hover.type == HT_PICK && A.hover.idx == i - HV_PICK0;
         else if (i == HV_MOK || i == HV_MCANCEL) on = A.hover.type == (i == HV_MOK ? HT_MOK : HT_MCANCEL);
         else if (i == HV_DONATE) on = A.hover.type == HT_DONATE;
+        else if (i == HV_LANG) on = A.hover.type == HT_LANG;
         else if (A.hover.type < countof(hv_of) && A.hover.type != HT_NONE) on = hv_of[A.hover.type] == i && A.hover.type != HT_PICK;
         if (i == HV_SLIDER && A.dragging) on = true;
         anim |= approach(&A.hv[i], on ? 1.f : 0.f, 22.f, dt);
@@ -1059,6 +1076,11 @@ static Hit hit_test(int mx, int my)
         h.type = HT_DONATE;
         return h;
     }
+    lang_box(&n);
+    if (in_b(&n, x, y)) {
+        h.type = HT_LANG;
+        return h;
+    }
     for (int i = 0; i < PG__COUNT; i++) {
         nav_box(i, &n);
         if (in_b(&n, x, y)) return (Hit){ HT_NAV, i };
@@ -1087,6 +1109,16 @@ static void slider_set(int mx)
         A.runs = v;
         invalidate();
     }
+}
+
+static void lang_switch(void)
+{
+    g_lang_ru = !g_lang_ru;
+    lang_save();
+    // the parts page holds ready-made texts: read them again in the new language
+    hw_start(A.hwnd);
+    A.page_t = 0;
+    invalidate();
 }
 
 static void set_page(int i)
@@ -1143,6 +1175,7 @@ static void mouse_down(int mx, int my)
     switch (h.type) {
     case HT_DONATE: don_open(); break;
     case HT_NAV: set_page(h.idx); break;
+    case HT_LANG: lang_switch(); break;
     case HT_SLIDER:
         A.dragging = true;
         slider_set(mx);
@@ -1336,7 +1369,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (LOWORD(lp) == HTCLIENT) {
             int t = A.hover.type;
             bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET || t == HT_MOK ||
-                        t == HT_MCANCEL || t == HT_DONATE || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
+                        t == HT_MCANCEL || t == HT_DONATE || t == HT_LANG || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
             SetCursor(LoadCursorW(NULL, hand ? (LPCWSTR)IDC_HAND : (LPCWSTR)IDC_ARROW));
             return TRUE;
         }

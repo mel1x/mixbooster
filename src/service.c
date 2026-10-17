@@ -237,10 +237,13 @@ static int g_msi_task_n;
 static DWORD WINAPI msi_thread(void *arg)
 {
     if (arg) {
+        // the playbook's task hands its settings over first, so the edits land on top of them
+        if (pb_task_present()) pb_takeover(g_msi_task, g_msi_task_n);
         for (int i = 0; i < g_msi_task_n; i++)
             if (msi_dirty(&g_msi_task[i])) msi_apply_one(&g_msi_task[i]);
     } else {
         msi_reset_all();
+        pb_restore();
     }
     // the service runs while it has something to keep
     u64 mask = 0;

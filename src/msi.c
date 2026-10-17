@@ -33,6 +33,7 @@ typedef struct MsiDev {
     int irq, nirq;           // the first IRQ (line-based) and how many it has
     int msi, prio;           // in the registry now: -1 absent, else the value
     bool managed;            // MixBooster keeps a setting for it
+    int gpu_bridge;          // a PCI bridge between a GPU and the CPU: 1 the GPU's own port, 2.. further up; 0 not one
     int new_msi, new_prio;   // the page's edits, equal to msi and prio when untouched
 } MsiDev;
 
@@ -273,6 +274,18 @@ static int msi_scan(MsiDev *out, int cap)
         n++;
     }
     SetupDiDestroyDeviceInfoList(set);
+    // the bridges up from each GPU, as gpu.c finds them for the affinity
+    for (int i = 0; i < n; i++) {
+        if (out[i].group != MG_GPU) continue;
+        DEVINST cur, parent;
+        if (CM_Locate_DevNodeW(&cur, out[i].id, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) continue;
+        WCHAR pid[200];
+        for (int depth = 1; depth <= 4 && CM_Get_Parent(&parent, cur, 0) == CR_SUCCESS &&
+                            CM_Get_Device_IDW(parent, pid, countof(pid), 0) == CR_SUCCESS && wstarts_with_i(pid, L"PCI\\");
+             depth++, cur = parent)
+            for (int j = 0; j < n; j++)
+                if (!_wcsicmp(out[j].id, pid) && (!out[j].gpu_bridge || out[j].gpu_bridge > depth)) out[j].gpu_bridge = depth;
+    }
     qsort(out, (size_t)n, sizeof *out, msi_cmp);
     return n;
 }
@@ -288,6 +301,92 @@ static bool msi_dirty(const MsiDev *m) { return m->new_msi != m->msi || m->new_p
 // Set in the registry but not running yet: the device picks it up on the next boot.
 static bool msi_pending(const MsiDev *m) { return m->has_irq && msi_capable(m) && m->msi >= 0 && (m->msi == 1) != m->irq_msi; }
 
+// --- the MixBoost playbook's "MixBoost MSI Mode" task -------------------------------------------------------------
+// The playbook turns MSI on for every capable device but disk and audio controllers, sets High priority for the GPUs,
+// each GPU's own PCI port and the network adapters, and keeps that with a scheduled task. Two keepers would fight over
+// the same values, so the first Apply here adopts what the playbook set and removes its task; "Reset all" registers
+// the task again with the playbook's own script, when it is still there.
+
+#define PB_TASK L"MixBoost MSI Mode"
+
+static bool pb_task_present(void)
+{
+    WCHAR win[MAX_PATH], p[MAX_PATH];
+    GetWindowsDirectoryW(win, MAX_PATH);
+    wfmt(p, MAX_PATH, L"%s\\System32\\Tasks\\%s", win, PB_TASK);
+    return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+}
+
+static void pb_script(WCHAR *out)
+{
+    WCHAR win[MAX_PATH];
+    GetWindowsDirectoryW(win, MAX_PATH);
+    wfmt(out, MAX_PATH, L"%s\\MixBoostModules\\Scripts\\setMsiMode.ps1", win);
+}
+
+// Runs a command without a window and waits for it; false when it couldn't start or failed.
+static bool run_hidden(const WCHAR *cmd, DWORD wait_ms)
+{
+    WCHAR line[1024];
+    wcopy(line, countof(line), cmd);
+    STARTUPINFOW si = { sizeof si };
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessW(NULL, line, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        log_msg("can't run %ls: %lu", cmd, GetLastError());
+        return false;
+    }
+    DWORD code = 1;
+    if (WaitForSingleObject(pi.hProcess, wait_ms) == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return code == 0;
+}
+
+// Whether the playbook's values were taken over: they stay kept even where they equal what was there before.
+static bool pb_adopted(void)
+{
+    u64 v = 0;
+    return reg_get_u64(L"PlaybookMsiTask", &v) && v;
+}
+
+// Takes the playbook's values on as MixBooster's own (so the service keeps them) and removes its task.
+static void pb_takeover(const MsiDev *d, int n)
+{
+    for (int i = 0; i < n; i++) {
+        const MsiDev *m = &d[i];
+        bool msi = m->group != MG_DISK && m->group != MG_AUDIO && (m->support & (IRQS_MSI | IRQS_MSIX)) && m->msi == 1;
+        bool prio = (m->group == MG_GPU || m->group == MG_NET || m->gpu_bridge == 1) && m->prio == 3;
+        if (!msi && !prio) continue;
+        MsiRec r;
+        if (!rec_get(m->id, &r)) r = (MsiRec){ -2, -2, -2, -2 };
+        // "before" is the playbook's value too: Reset all leaves it, and the task comes back to keep it
+        if (msi && r.want_msi == -2) r.want_msi = r.old_msi = 1;
+        if (prio && r.want_prio == -2) r.want_prio = r.old_prio = 3;
+        rec_put(m->id, &r);
+    }
+    reg_set_u64(L"PlaybookMsiTask", 1);
+    WCHAR cmd[256];
+    wfmt(cmd, countof(cmd), L"schtasks.exe /Delete /TN \"%s\" /F", PB_TASK);
+    bool ok = run_hidden(cmd, 20000);
+    log_msg("msi: took over the playbook's settings, its task %s", ok ? "removed" : "could not be removed");
+}
+
+// Gives the playbook its task back, after Reset all.
+static void pb_restore(void)
+{
+    if (!pb_adopted()) return;
+    reg_delete(L"PlaybookMsiTask");
+    WCHAR script[MAX_PATH], cmd[MAX_PATH + 128];
+    pb_script(script);
+    if (GetFileAttributesW(script) == INVALID_FILE_ATTRIBUTES) {
+        log_msg("msi: the playbook's script is gone, its task is not restored");
+        return;
+    }
+    wfmt(cmd, countof(cmd), L"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"%s\" -Register", script);
+    bool ok = run_hidden(cmd, 120000);
+    log_msg("msi: the playbook's task %s", ok ? "registered again" : "could not be registered again");
+}
+
 // --- applying, restoring, resetting ----------------------------------------------------------------------------------
 
 // Writes one device's edits and keeps them for the service, with what was there before.
@@ -298,13 +397,13 @@ static void msi_apply_one(const MsiDev *m)
     if (m->new_msi != m->msi) {
         if (r.old_msi == -2) r.old_msi = m->msi;
         msi_put(m->id, m->new_msi);
-        r.want_msi = m->new_msi == r.old_msi ? -2 : m->new_msi;
+        r.want_msi = m->new_msi == r.old_msi && !pb_adopted() ? -2 : m->new_msi;
         log_msg("msi: %ls MSISupported -> %d", m->id, m->new_msi);
     }
     if (m->new_prio != m->prio) {
         if (r.old_prio == -2) r.old_prio = m->prio;
         prio_put(m->id, m->new_prio);
-        r.want_prio = m->new_prio == r.old_prio ? -2 : m->new_prio;
+        r.want_prio = m->new_prio == r.old_prio && !pb_adopted() ? -2 : m->new_prio;
         log_msg("msi: %ls DevicePriority -> %d", m->id, m->new_prio);
     }
     if (r.want_msi == -2 && r.want_prio == -2) rec_delete(m->id);

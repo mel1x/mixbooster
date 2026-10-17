@@ -12,6 +12,7 @@ static struct {
     Box card, table, rows, apply, discard, resetall, reboot;
     Box tog_box[MSI_MAX], prio_box[MSI_MAX];
     bool applied;              // settings were written this session: a reboot is due
+    bool pb_task;              // the playbook's "MixBoost MSI Mode" task is there
     int pend_dev, pend_val;    // a disk controller's change, waiting behind the warning
     WCHAR note[160];
     bool note_bad;
@@ -49,6 +50,7 @@ static void msi_rescan(void)
 {
     MS.n = msi_scan(MS.d, MSI_MAX);
     MS.ready = true;
+    MP.pb_task = pb_task_present();
     for (int i = 0; i < MS.n; i++) MP.tog[i] = msi_shown_on(&MS.d[i]) ? 1.f : 0.f;
     MP.dd = -1;
 }
@@ -191,8 +193,12 @@ static void draw_msi_card(void)
     WCHAR title[96], sub[200];
     if (dirty) {
         wfmt(title, countof(title), TR("Изменено устройств: %d", "Devices changed: %d"), dirty);
-        wcopy(sub, countof(sub), TR("Нажмите «Применить», настройки заработают после перезагрузки ПК",
-                                    "Press Apply; the settings take effect after a restart"));
+        if (MP.pb_task)
+            wcopy(sub, countof(sub), TR("«Применить» заменит задачу плейбука MixBoost MSI Mode службой MixBooster, настройки заработают после перезагрузки",
+                                        "Apply replaces the playbook's MixBoost MSI Mode task with the MixBooster service; it takes effect after a restart"));
+        else
+            wcopy(sub, countof(sub), TR("Нажмите «Применить», настройки заработают после перезагрузки ПК",
+                                        "Press Apply; the settings take effect after a restart"));
     } else if (reboot) {
         wcopy(title, countof(title), TR("Нужна перезагрузка", "A restart is due"));
         wcopy(sub, countof(sub), TR("Новые настройки прерываний заработают после перезагрузки ПК", "The new interrupt settings take effect after a restart"));
@@ -202,6 +208,10 @@ static void draw_msi_card(void)
              TR("Служба следит за устройствами (%d): после обновления драйверов настройки вернутся сами",
                 "The service keeps %d device(s): the settings come back by themselves after driver updates"),
              managed);
+    } else if (MP.pb_task) {
+        wcopy(title, countof(title), TR("Настройки от плейбука MixBoost", "Settings from the MixBoost playbook"));
+        wcopy(sub, countof(sub), TR("Их держит задача MixBoost MSI Mode. Первое «Применить» передаст их службе MixBooster",
+                                    "The MixBoost MSI Mode task keeps them. The first Apply hands them over to the MixBooster service"));
     } else {
         wcopy(title, countof(title), TR("Режим прерываний MSI", "MSI interrupt mode"));
         wcopy(sub, countof(sub), TR("MSI снижает задержку прерываний. Включайте его устройствам, которые его поддерживают",
@@ -274,15 +284,29 @@ static void draw_msi_table(void)
             r_rect(nx, floorf(cy - S(9) - d * 0.5f), d, d, t->accent, d * 0.5f);
             nx += d + S(8);
         }
-        text_draw_fit(FONT_TEXT, SC(13.5f), nx, baseline_for(FONT_TEXT, SC(13.5f), cy - S(9)), k.name_w - (nx - k.name), m->name, -1, t->text, false);
+        // a badge right after the name: the GPU's PCI port, or a warning on a disk controller
+        u32 badge = m->gpu_bridge ? 0xF211 : m->group == MG_DISK ? 0xE7BA : 0;
+        f32 bw = badge ? S(26) : 0, avail = k.name_w - (nx - k.name) - bw;
+        f32 nw = MIN(text_width(FONT_TEXT, SC(13.5f), m->name, -1), avail);
+        text_draw_fit(FONT_TEXT, SC(13.5f), nx, baseline_for(FONT_TEXT, SC(13.5f), cy - S(9)), avail, m->name, -1, t->text, false);
+        if (badge) {
+            f32 bx = nx + nw + S(16), by = cy - S(9);
+            if (m->gpu_bridge) {
+                r_rect(bx - S(11), by - S(9), S(22), S(18), color_alpha(t->accent, 0.18f), S(5));
+                text_draw_icon(badge, SC(11), bx, by, t->accent);
+            } else {
+                text_draw_icon(badge, SC(12), bx, by, t->warn);
+            }
+        }
         WCHAR sub[220];
         wcopy(sub, countof(sub), m->id);
         WCHAR *cut = wcsstr(sub, L"&SUBSYS");
         if (cut) *cut = 0;
-        if (m->managed) {
-            int l = wlen(sub);
-            wfmt(sub + l, countof(sub) - l, TR(" · под защитой службы", " · kept by the service"));
-        }
+        int l = wlen(sub);
+        if (m->gpu_bridge == 1) l += wfmt(sub + l, countof(sub) - l, TR(" · порт видеокарты", " · the GPU's port"));
+        else if (m->gpu_bridge) l += wfmt(sub + l, countof(sub) - l, TR(" · шина видеокарты", " · on the GPU's path"));
+        if (m->group == MG_DISK) l += wfmt(sub + l, countof(sub) - l, TR(" · лучше не трогать", " · best left alone"));
+        if (m->managed) wfmt(sub + l, countof(sub) - l, TR(" · под защитой службы", " · kept by the service"));
         text_draw_fit(FONT_TEXT, SC(11.5f), k.name, baseline_for(FONT_TEXT, SC(11.5f), cy + S(10)), k.name_w, sub, -1, t->faint, false);
 
         // what the device can do

@@ -36,7 +36,11 @@ asks first, since a controller that fails to start can keep Windows from booting
 
 What *Apply* changes is kept in `HKLM\SOFTWARE\MixBooster\Msi` with the values that were there before. The same service
 writes the wanted values back when a driver install drops them (it watches every device arrival), and *Reset all* puts
-the old values back. The service stays installed while it keeps either the GPU core or MSI settings.
+the old values back. The service stays installed while it keeps either the GPU core or MSI settings, and is removed
+when neither is left, whichever is reset last.
+
+When the MixBoost playbook's `MixBoost MSI Mode` task is there, the first *Apply* adopts the values it set and removes the
+task, so only one keeper is left; *Reset all* registers the task again with the playbook's `setMsiMode.ps1`.
 
 ## Build
 

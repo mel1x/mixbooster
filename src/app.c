@@ -36,7 +36,7 @@ enum {
     HT_MOUT,
     HT_DONATE,    // the sidebar button
     HT_DON,       // the donation panel; idx: a wallet or DON_*
-    HT_LANG,      // the language switch in the sidebar
+    HT_LANG,      // the language switch in the sidebar; idx: 0 Russian, 1 English
     HT_MANUAL,    // "Pick cores" next to the bind button
     HT_PKCELL,    // the core picker; idx: the CPU
     HT_PKBEST,
@@ -97,6 +97,7 @@ static struct {
     f32 pick_t;               // 0..1 between the two pick tiles
     f32 prog;                 // the progress bar, eased
     f32 page_t;
+    f32 lang_t;               // the language switch's selection: 0 Russian, 1 English
     int page;                 // PG_*
     f32 nav_y, nav_v, nav_hov[PG__COUNT];
     f32 hw_scroll, hw_scroll_target, hw_scroll_v, hw_content_h, hw_sb_t;
@@ -431,15 +432,20 @@ static void draw_sidebar(void)
     text_draw_icon(0xEB51, SC(15), d.x + S(10) + isz * 0.5f, dcy, color_mix(t->faint, t->dim, hv));
     text_draw_fit(FONT_TEXT, fs, d.x + S(10) + isz + S(12), baseline_for(FONT_TEXT, fs, dcy), d.w - isz - S(32), TR("Поддержать автора", "Support the author"),
                   -1, color_mix(t->dim, t->text, hv), false);
+    // the language: a Windows 11 segmented control, both names in view, the chosen one on a sliding plate
     Box lb;
     lang_box(&lb);
-    f32 lh = A.hv[HV_LANG], lcy = lb.y + lb.h * 0.5f;
-    if (lh > 0) r_rect(lb.x, lb.y, lb.w, lb.h, color_alpha(c->nav_hover, lh), S(8));
-    text_draw_icon(0xE774, SC(15), lb.x + S(10) + isz * 0.5f, lcy, color_mix(t->faint, t->dim, lh));
-    // the current language; a click switches to the other one, shown on the right
-    text_draw(FONT_TEXT, fs, lb.x + S(10) + isz + S(12), baseline_for(FONT_TEXT, fs, lcy), g_lang_ru ? L"Русский" : L"English", -1,
-              color_mix(t->dim, t->text, lh));
-    text_right(FONT_TEXT, SC(12), lb.x + lb.w - S(12), lcy, g_lang_ru ? L"EN" : L"RU", color_mix(t->faint, t->dim, lh));
+    f32 lcy = lb.y + lb.h * 0.5f, half = floorf(lb.w * 0.5f), in = S(3);
+    r_rect(lb.x, lb.y, lb.w, lb.h, c->ctl, S(8));
+    f32 px = floorf(lb.x + in + (half - in) * A.lang_t + 0.5f), pw = half - in, ph = lb.h - in * 2;
+    if (!t->dark) r_rect_ex(px, lb.y + in + S(1), pw, ph, RGBA(0, 0, 0, 22), S(6), 0, S(2));
+    r_rect(px, lb.y + in, pw, ph, t->dark ? RGBA(255, 255, 255, 30) : RGBA(255, 255, 255, 255), S(6));
+    r_rect_ex(px, lb.y + in, pw, ph, t->dark ? RGBA(255, 255, 255, 14) : RGBA(0, 0, 0, 16), S(6), 1.f, 0);
+    for (int k = 0; k < 2; k++) {
+        bool sel = (k == 1) != g_lang_ru, hov = A.hover.type == HT_LANG && A.hover.idx == k && !sel;
+        u32 col = sel ? t->text : hov ? color_mix(t->dim, t->text, 0.6f) : t->dim;
+        text_center(sel ? FONT_TEXT_SEMIBOLD : FONT_TEXT, SC(13), lb.x + half * (f32)k + half * 0.5f, lcy, k ? L"English" : L"Русский", col);
+    }
     text_draw(FONT_TEXT, SC(12), x + S(18), floorf(lb.y - S(12)), TR("Версия " MB_VER_STR, "Version " MB_VER_STR), -1, t->faint);
 }
 
@@ -1129,6 +1135,7 @@ static bool animate(f32 dt)
     anim |= approach(&A.sb_t, sb_on ? 1.f : 0.f, sb_on ? 20.f : 7.f, dt);
     anim |= approach(&A.modal_t, A.modal ? 1.f : 0.f, A.modal ? 14.f : 18.f, dt);
     anim |= approach(&A.picker_t, A.picker ? 1.f : 0.f, A.picker ? 14.f : 18.f, dt);
+    anim |= approach(&A.lang_t, g_lang_ru ? 0.f : 1.f, 18.f, dt);
     Box nb;
     nav_box(A.page, &nb);
     anim |= spring_step(&A.nav_y, &A.nav_v, nb.y, 26.f, dt);
@@ -1221,10 +1228,7 @@ static Hit hit_test(int mx, int my)
         return h;
     }
     lang_box(&n);
-    if (in_b(&n, x, y)) {
-        h.type = HT_LANG;
-        return h;
-    }
+    if (in_b(&n, x, y)) return (Hit){ HT_LANG, x < n.x + n.w * 0.5f ? 0 : 1 };
     for (int i = 0; i < PG__COUNT; i++) {
         nav_box(i, &n);
         if (in_b(&n, x, y)) return (Hit){ HT_NAV, i };
@@ -1320,7 +1324,9 @@ static void mouse_down(int mx, int my)
     switch (h.type) {
     case HT_DONATE: don_open(); break;
     case HT_NAV: set_page(h.idx); break;
-    case HT_LANG: lang_switch(); break;
+    case HT_LANG:
+        if ((h.idx == 1) == g_lang_ru) lang_switch();
+        break;
     case HT_PKCELL: A.pk_mask ^= 1ull << h.idx; break;
     case HT_SLIDER:
         A.dragging = true;
@@ -1705,6 +1711,7 @@ static bool app_open(void)
     Box nb;
     nav_box(A.page, &nb);
     A.nav_y = nb.y;
+    A.lang_t = g_lang_ru ? 0.f : 1.f;
     hw_start(A.hwnd);
     A.last_frame = time_now();
     A.dirty = true;

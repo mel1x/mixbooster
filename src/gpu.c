@@ -18,11 +18,119 @@ typedef struct GpuDev {
     WCHAR name[128];
     WCHAR bridge[4][200];   // the PCI bridges up to the root complex, nearest first
     int nbridge;
+    bool integrated;
 } GpuDev;
 
 static const GUID k_class_display = { 0x4d36e968, 0xe325, 0x11ce, { 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 } };
 // GUID_DEVINTERFACE_DISPLAY_ADAPTER: arrives again whenever the driver is installed or updated.
 static const GUID k_iface_display = { 0x5b45201d, 0xf2f2, 0x4f3b, { 0x85, 0xbb, 0x30, 0xff, 0x1f, 0x95, 0x35, 0x99 } };
+
+// --- integrated or discrete, from Vulkan ---------------------------------------------------------------------------
+// Vulkan says which GPU is integrated, for every vendor, and lists them in the order liblava picks from ("physical
+// device" N in its config). Loaded at runtime with the few structures it needs; without Vulkan every GPU counts as
+// discrete, as before.
+
+typedef struct MbVkAppInfo {
+    u32 sType;
+    const void *pNext;
+    const char *pApplicationName;
+    u32 applicationVersion;
+    const char *pEngineName;
+    u32 engineVersion;
+    u32 apiVersion;
+} MbVkAppInfo;
+
+typedef struct MbVkInstanceInfo {
+    u32 sType;
+    const void *pNext;
+    u32 flags;
+    const MbVkAppInfo *pApplicationInfo;
+    u32 enabledLayerCount;
+    const char *const *ppEnabledLayerNames;
+    u32 enabledExtensionCount;
+    const char *const *ppEnabledExtensionNames;
+} MbVkInstanceInfo;
+
+typedef int (*PFN_mbVkCreateInstance)(const MbVkInstanceInfo *, const void *, void **);
+typedef void (*PFN_mbVkDestroyInstance)(void *, const void *);
+typedef int (*PFN_mbVkEnumeratePhysicalDevices)(void *, u32 *, void **);
+typedef void (*PFN_mbVkGetPhysicalDeviceProperties)(void *, void *);
+
+enum { VKT_OTHER = 0, VKT_INTEGRATED = 1, VKT_DISCRETE = 2 };
+
+typedef struct VkGpu {
+    u32 vendor, device, type;
+} VkGpu;
+
+static struct {
+    SRWLOCK lock;
+    bool done;
+    VkGpu gpu[8];
+    int n;
+} VKG = { SRWLOCK_INIT };
+
+// The GPUs in Vulkan's order, read once per process.
+static int vk_gpus(VkGpu **out)
+{
+    AcquireSRWLockExclusive(&VKG.lock);
+    if (!VKG.done) {
+        VKG.done = true;
+        HMODULE m = LoadLibraryW(L"vulkan-1.dll");
+        PFN_mbVkCreateInstance create = m ? (PFN_mbVkCreateInstance)(void *)GetProcAddress(m, "vkCreateInstance") : NULL;
+        PFN_mbVkDestroyInstance destroy = m ? (PFN_mbVkDestroyInstance)(void *)GetProcAddress(m, "vkDestroyInstance") : NULL;
+        PFN_mbVkEnumeratePhysicalDevices enumerate = m ? (PFN_mbVkEnumeratePhysicalDevices)(void *)GetProcAddress(m, "vkEnumeratePhysicalDevices") : NULL;
+        PFN_mbVkGetPhysicalDeviceProperties props = m ? (PFN_mbVkGetPhysicalDeviceProperties)(void *)GetProcAddress(m, "vkGetPhysicalDeviceProperties") : NULL;
+        void *inst = NULL;
+        MbVkAppInfo app = { 0, NULL, "MixBooster", 1, "MixBooster", 1, 1u << 22 /* 1.0 */ };
+        MbVkInstanceInfo ci = { 1, NULL, 0, &app, 0, NULL, 0, NULL };
+        if (create && destroy && enumerate && props && create(&ci, NULL, &inst) == 0 && inst) {
+            void *dev[8];
+            u32 n = countof(dev);
+            int r = enumerate(inst, &n, dev);
+            for (u32 i = 0; (r == 0 || r == 5 /* VK_INCOMPLETE */) && i < n && VKG.n < countof(VKG.gpu); i++) {
+                // VkPhysicalDeviceProperties: apiVersion, driverVersion, vendorID, deviceID, deviceType, deviceName...
+                static u32 p[1024];
+                memset(p, 0, sizeof p);
+                props(dev[i], p);
+                VKG.gpu[VKG.n++] = (VkGpu){ p[2], p[3], p[4] == 1 ? VKT_INTEGRATED : p[4] == 2 ? VKT_DISCRETE : VKT_OTHER };
+            }
+            destroy(inst, NULL);
+        } else {
+            log_msg("vulkan: not available, every GPU counts as discrete");
+        }
+    }
+    ReleaseSRWLockExclusive(&VKG.lock);
+    *out = VKG.gpu;
+    return VKG.n;
+}
+
+static void pci_ids(const WCHAR *id, u32 *ven, u32 *dev)
+{
+    const WCHAR *v = wcsstr(id, L"VEN_"), *d = wcsstr(id, L"DEV_");
+    *ven = v ? (u32)wcstoul(v + 4, NULL, 16) : 0;
+    *dev = d ? (u32)wcstoul(d + 4, NULL, 16) : 0;
+}
+
+static bool gpu_is_integrated(const WCHAR *id)
+{
+    VkGpu *g;
+    int n = vk_gpus(&g);
+    u32 ven, dev;
+    pci_ids(id, &ven, &dev);
+    for (int i = 0; i < n; i++)
+        if (g[i].vendor == ven && g[i].device == dev) return g[i].type == VKT_INTEGRATED;
+    return false;
+}
+
+// liblava's "physical device": the first discrete GPU, else the first one.
+static int vk_test_device(void)
+{
+    VkGpu *g;
+    int n = vk_gpus(&g);
+    for (int i = 0; i < n; i++)
+        if (g[i].type == VKT_DISCRETE) return i;
+    return 0;
+}
 
 static int gpu_list(GpuDev *out, int cap)
 {
@@ -44,9 +152,20 @@ static int gpu_list(GpuDev *out, int cap)
             wcopy(g->bridge[g->nbridge++], countof(g->bridge[0]), pid);
             cur = parent;
         }
+        g->integrated = gpu_is_integrated(g->id);
         n++;
     }
     SetupDiDestroyDeviceInfoList(set);
+    // With a discrete GPU present, the iGPU is left alone: the test runs on the discrete one, and restarting the iGPU
+    // too would only black out a laptop's own screen for nothing.
+    bool discrete = false;
+    for (int i = 0; i < n; i++) discrete |= !out[i].integrated;
+    if (discrete) {
+        int k = 0;
+        for (int i = 0; i < n; i++)
+            if (!out[i].integrated) out[k++] = out[i];
+        n = k;
+    }
     return n;
 }
 

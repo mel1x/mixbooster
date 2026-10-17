@@ -365,9 +365,7 @@ static void hw_gpu(void)
         g->speed = dev_u32(set, &d, &k_pci_speed);
         g->width = dev_u32(set, &d, &k_pci_width);
         g->max_width = dev_u32(set, &d, &k_pci_max_width);
-        // An iGPU sits on the CPU's own bus 0 and has no PCIe link of its own.
-        DWORD bus = 0;
-        g->integrated = !g->width && SetupDiGetDeviceRegistryPropertyW(set, &d, SPDRP_BUSNUMBER, NULL, (BYTE *)&bus, sizeof bus, NULL) && bus == 0;
+        g->integrated = gpu_is_integrated(g->id);
         n++;
     }
     if (set != INVALID_HANDLE_VALUE) SetupDiDestroyDeviceInfoList(set);
@@ -375,10 +373,10 @@ static void hw_gpu(void)
         wcopy(c->head, countof(c->head), TR("Не найдена", "Not found"));
         return;
     }
-    // The main one is the one with the most memory: the discrete card on a laptop with an iGPU too.
+    // The main one: a discrete card before an iGPU, then the one with the most memory.
     int m = 0;
     for (int i = 1; i < n; i++)
-        if (gi[i].vram > gi[m].vram) m = i;
+        if ((gi[m].integrated && !gi[i].integrated) || (gi[i].integrated == gi[m].integrated && gi[i].vram > gi[m].vram)) m = i;
     GpuInfo *g = &gi[m];
     wcopy(c->head, countof(c->head), g->name);
     WCHAR vs[32] = L"";

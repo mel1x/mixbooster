@@ -75,11 +75,15 @@ static void lava_config(void)
                      GetSystemMetrics(SM_CYSCREEN), GetSystemMetrics(SM_CXSCREEN));
     wfmt(path, MAX_PATH, L"%s\\window.json", dir);
     write_file(path, buf, (DWORD)n);
-    static const char cfg[] = "{\n    \"auto load\": true,\n    \"auto save\": false,\n    \"delta\": 20,\n    \"fixed delta\": false,\n"
-                              "    \"gui\": false,\n    \"paused\": false,\n    \"physical device\": 0,\n    \"save interval\": 300,\n"
-                              "    \"speed\": 1.0,\n    \"v-sync\": false\n}\n";
+    // on a laptop with an iGPU too, the demo runs on the discrete GPU
+    char cfg[512];
+    n = snprintf(cfg, sizeof cfg,
+                 "{\n    \"auto load\": true,\n    \"auto save\": false,\n    \"delta\": 20,\n    \"fixed delta\": false,\n"
+                 "    \"gui\": false,\n    \"paused\": false,\n    \"physical device\": %d,\n    \"save interval\": 300,\n"
+                 "    \"speed\": 1.0,\n    \"v-sync\": false\n}\n",
+                 vk_test_device());
     wfmt(path, MAX_PATH, L"%s\\config.json", dir);
-    write_file(path, cfg, sizeof cfg - 1);
+    write_file(path, cfg, (DWORD)n);
 }
 
 static HANDLE spawn(const WCHAR *exe, const WCHAR *args, bool hidden)

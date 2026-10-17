@@ -35,7 +35,7 @@ static LRESULT CALLBACK ovl_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         DeleteObject(acc);
 
         AcquireSRWLockShared(&B.lock);
-        int phase = B.phase, run = B.run, cpu = B.cpu, runs = B.runs, step = B.done_steps + 1, total = B.total_steps;
+        int phase = B.phase, run = B.run, cpu = B.cpu, runs = bench_runs_shown(), step = B.done_steps + 1, total = B.total_steps;
         f64 left = B.phase_len - (time_now() - B.phase_t0);
         ReleaseSRWLockShared(&B.lock);
         WCHAR l1[96], l2[200], ph[64];

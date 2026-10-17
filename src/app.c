@@ -47,10 +47,12 @@ enum {
     HT_PKOUT,
     HT_HLREFRESH, // "Check again" on the health page
     HT_COLHDR,    // a column header of the results table; idx: 0 the CPU, 1.. a metric column
+    HT_TABPLUS,   // "+" after the run tabs: one more run
+    HT_RERUN,     // "Run again" on an empty or unfinished run
 };
 
 // Hover animation slots.
-enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_LANG, HV_MANUAL, HV_PKBEST, HV_PKCLEAR, HV_PKOK, HV_PKCANCEL, HV_HLREFRESH, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
+enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_LANG, HV_MANUAL, HV_PKBEST, HV_PKCLEAR, HV_PKOK, HV_PKCANCEL, HV_HLREFRESH, HV_TABPLUS, HV_RERUN, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
 
 // The sidebar pages, top to bottom.
 enum { PG_HW, PG_HEALTH, PG_AFF, PG__COUNT };
@@ -110,6 +112,9 @@ static struct {
     int sort_col;             // the results table: 0 by the CPU, k + 1 by the column k_cols[k]
     bool sort_desc;
     int order[MAX_CPUS];      // the CPUs in the order the table shows them
+    Box tab_plus, rerun_btn;
+    int mmode, mrun;          // what the dialog before a test starts: MM_*, and for a rerun which run
+    int last_mode;            // what the test that runs (or ran last) was: MM_*
     f64 hw_t0, hl_t0;         // when a reading began: the skeleton stays a moment, so a fast one doesn't blink
     Box hl_refresh;
     bool picker;              // the manual core picker
@@ -131,6 +136,8 @@ static struct {
 } A;
 
 static void start_or_stop(void);
+// What the dialog before a test starts: the whole test, one run again, or one more run.
+enum { MM_FULL, MM_RERUN, MM_ADD };
 static void ovl_update(void);
 
 static f32 S(f32 v) { return floorf(v * A.s + 0.5f); }
@@ -396,6 +403,8 @@ static void layout(void)
         A.tabs[i] = (Box){ x, ty + S(8), w, A.strip.h - S(8) };
         x += w + S(2);
     }
+    A.tab_plus = (Box){ 0 };
+    if (A.ntabs && B.runs < BENCH_MAX_RUNS) A.tab_plus = (Box){ x + S(2), ty + S(8), S(44), A.strip.h - S(8) };
     f32 hh = S(40);
     A.rows = (Box){ x0, A.body.y + hh, cw, A.body.h - hh - S(6) };
     A.content_h = (f32)B.ncpu * S(38);
@@ -528,7 +537,7 @@ static void draw_controls(void)
         int phase = B.phase, r = B.run, cpu = B.cpu;
         f64 el = time_now() - B.phase_t0, len = B.phase_len;
         ReleaseSRWLockShared(&B.lock);
-        wfmt(line, countof(line), TR("Прогон %d из %d · CPU %d (%d из %d)", "Run %d of %d · CPU %d (%d of %d)"), r + 1, B.runs, cpu, cpu + 1, B.ncpu);
+        wfmt(line, countof(line), TR("Прогон %d из %d · CPU %d (%d из %d)", "Run %d of %d · CPU %d (%d of %d)"), r + 1, bench_runs_shown(), cpu, cpu + 1, B.ncpu);
         if (phase == PH_PREPARE) wcopy(line, countof(line), TR("Подготовка…", "Preparing…"));
         if (phase == PH_RESTORE) wcopy(line, countof(line), TR("Возвращаю настройки видеокарты…", "Restoring the GPU settings…"));
         text_draw_fit(FONT_TEXT_SEMIBOLD, fs, rx, baseline_for(FONT_TEXT, fs, top), rr - rx, line, -1, t->text, false);
@@ -685,6 +694,42 @@ static void draw_tabs(void)
             r_rect(tb->x + tb->w - S(14) - d * 0.5f, floorf(cy - d * 0.5f), d, d, t->accent, d * 0.5f);
         }
     }
+    // "+": one more run; while it runs the dot sits here, its tab comes when it is done
+    if (A.tab_plus.w > 0) {
+        Box *pb = &A.tab_plus;
+        f32 hv = run ? 0.f : A.hv[HV_TABPLUS], cy = pb->y + (pb->h - S(3)) * 0.5f;
+        if (hv > 0) r_rect(pb->x + S(2), pb->y + S(3), pb->w - S(4), pb->h - S(9), color_alpha(c->nav_hover, hv), S(6));
+        bool adding = run && B.append;
+        text_draw_icon(0xE710, SC(12), pb->x + pb->w * 0.5f - (adding ? S(5) : 0), cy, run && !adding ? t->faint : color_mix(t->dim, t->text, hv));
+        if (adding) {
+            f32 d = S(6);
+            r_rect(pb->x + pb->w - S(12) - d * 0.5f, floorf(cy - d * 0.5f), d, d, t->accent, d * 0.5f);
+        }
+    }
+}
+
+// An empty run (the test was stopped before it) or an unfinished one (stopped half way): a button to run it again.
+static void draw_rerun(int run, int have)
+{
+    const Theme *t = &A.th;
+    Box *b = &A.body;
+    f32 cx = b->x + b->w * 0.5f, cy = b->y + b->h * 0.42f, isz = S(52);
+    r_rect(cx - isz * 0.5f, cy - S(70) - isz * 0.5f, isz, isz, color_alpha(t->warn, 0.14f), isz * 0.5f);
+    text_draw_icon(have ? 0xE7BA : 0xE9CE, SC(22), cx, cy - S(70), t->warn);
+    WCHAR title[64], sub[160];
+    if (have) {
+        wfmt(title, countof(title), TR("Прогон %d не завершён", "Run %d isn't finished"), run + 1);
+        wfmt(sub, countof(sub), TR("Тест остановили на середине: измерено %d из %d ядер", "The test was stopped half way: %d of %d cores measured"), have,
+             B.ncpu);
+    } else {
+        wfmt(title, countof(title), TR("Прогон %d пуст", "Run %d is empty"), run + 1);
+        wcopy(sub, countof(sub), TR("Тест остановили до начала этого прогона", "The test was stopped before this run began"));
+    }
+    text_center(FONT_TEXT_SEMIBOLD, SC(16), cx, cy - S(22), title, t->text);
+    text_center(FONT_TEXT, SC(13), cx, cy + S(2), sub, t->dim);
+    A.rerun_btn = (Box){ floorf(cx - S(115)), cy + S(28), S(230), S(36) };
+    draw_button(&A.rerun_btn, TR("Перезапустить прогон", "Run it again"), GLYPH_PLAY, BTN_ACCENT, A.hv[HV_RERUN],
+                A.press.type == HT_RERUN && A.hover.type == HT_RERUN, B.running || g_task_busy);
 }
 
 static void fmt_metric(WCHAR *out, int cap, int m, f32 v)
@@ -715,6 +760,20 @@ static void draw_table(void)
         return;
     }
     draw_tabs();
+    A.rerun_btn = (Box){ 0 };
+    {
+        int r = A.tab - 1;
+        if (r >= 0 && r < B.runs && !(B.running && r == B.run)) {
+            int have = 0;
+            AcquireSRWLockShared(&B.lock);
+            for (int c2 = 0; c2 < B.ncpu; c2++) have += B.r[r][c2].ok;
+            ReleaseSRWLockShared(&B.lock);
+            if (have < B.ncpu) {
+                draw_rerun(r, have);
+                return;
+            }
+        }
+    }
     Box *b = &A.body;
     int ncol = countof(k_cols);
     f32 cpu_w = S(150), pad = S(20), colw = (b->w - cpu_w - pad * 2) / (f32)ncol;
@@ -724,14 +783,14 @@ static void draw_table(void)
     bool hcpu = A.hover.type == HT_COLHDR && A.hover.idx == 0;
     f32 cx = text_draw(FONT_TEXT_SEMIBOLD, hfs, b->x + pad, baseline_for(FONT_TEXT, hfs, hy), L"CPU", -1,
                        A.sort_col == 0 || hcpu ? t->text : t->dim);
-    if (A.sort_col == 0) text_draw_icon(arrow, SC(9), cx + S(10), hy, t->accent);
+    if (A.sort_col == 0) text_draw_icon(arrow, SC(9), cx + S(10), hy, t->text);
     for (int k = 0; k < ncol; k++) {
         bool sorted = A.sort_col == k + 1, hov = A.hover.type == HT_COLHDR && A.hover.idx == k + 1;
         f32 right = b->x + pad + cpu_w + colw * (f32)(k + 1), lw = text_width(FONT_TEXT_SEMIBOLD, hfs, col_name(k_cols[k]), -1);
         f32 lx = MAX(b->x + pad + cpu_w + colw * (f32)k + (sorted ? S(14) : 0), right - lw);
-        text_draw_fit(FONT_TEXT_SEMIBOLD, hfs, lx, baseline_for(FONT_TEXT, hfs, hy), right - lx, col_name(k_cols[k]), -1, sorted || hov ? t->text : t->dim,
-                      false);
-        if (sorted) text_draw_icon(arrow, SC(9), lx - S(9), hy, t->accent);
+        text_draw_fit(FONT_TEXT_SEMIBOLD, hfs, lx, baseline_for(FONT_TEXT, hfs, hy), right - lx + S(2), col_name(k_cols[k]), -1,
+                      sorted || hov ? t->text : t->dim, false);
+        if (sorted) text_draw_icon(arrow, SC(9), lx - S(9), hy, t->text);
     }
     r_rect(b->x + S(12), b->y + S(39), b->w - S(24), 1, t->sep, 0);
 
@@ -870,7 +929,7 @@ static int modal_items(ModalItem *it, WCHAR *eta, int cap)
 {
     f64 step = BENCH_SETTLE_SEC + BENCH_WARMUP_SEC + BENCH_MEASURE_SEC;
     WCHAR d[48];
-    fmt_duration(d, countof(d), step * A.cpu.count * A.runs);
+    fmt_duration(d, countof(d), step * (A.mmode == MM_FULL ? A.cpu.count * A.runs : B.ncpu));
     wfmt(eta, cap,
          TR("Тест займёт %s. Экран будет гаснуть и уходить в полноэкранный режим - это перезапуск драйвера видеокарты на каждом ядре.",
             "The test takes %s. The screen goes black and fullscreen now and then: the GPU driver restarts for every core."),
@@ -921,8 +980,11 @@ static void modal_pass(bool draw)
     f32 cy = y + pad + S(18), ic = S(36);
     r_rect(x + pad, cy - ic * 0.5f, ic, ic, color_alpha(t->accent, 0.18f), S(9));
     text_draw_icon(0xE768, SC(16), x + pad + ic * 0.5f, cy, t->text);
-    text_draw(FONT_TEXT_SEMIBOLD, SC(19), x + pad + ic + S(14), baseline_for(FONT_TEXT_SEMIBOLD, SC(19), cy), TR("Перед началом теста", "Before the test"), -1,
-              t->text);
+    WCHAR title[64];
+    if (A.mmode == MM_RERUN) wfmt(title, countof(title), TR("Перезапуск прогона %d", "Running run %d again"), A.mrun + 1);
+    else if (A.mmode == MM_ADD) wfmt(title, countof(title), TR("Новый прогон %d", "New run %d"), A.mrun + 1);
+    else wcopy(title, countof(title), TR("Перед началом теста", "Before the test"));
+    text_draw(FONT_TEXT_SEMIBOLD, SC(19), x + pad + ic + S(14), baseline_for(FONT_TEXT_SEMIBOLD, SC(19), cy), title, -1, t->text);
 
     f32 iy = y + pad + S(40) + S(20);
     for (int i = 0; i < n; i++) {
@@ -943,12 +1005,17 @@ static void modal_pass(bool draw)
     r_rect(x + S(1), A.m_ok.y - S(18), w - S(2), 1, t->sep, 0);
     Hit *hv = &A.hover;
     draw_button(&A.m_cancel, TR("Отмена", "Cancel"), 0, BTN_NEUTRAL, A.hv[HV_MCANCEL], A.press.type == HT_MCANCEL && hv->type == HT_MCANCEL, false);
-    draw_button(&A.m_ok, TR("Начать тест", "Start test"), GLYPH_PLAY, BTN_ACCENT, A.hv[HV_MOK], A.press.type == HT_MOK && hv->type == HT_MOK, false);
+    draw_button(&A.m_ok, A.mmode == MM_RERUN ? TR("Перезапустить", "Run again") : A.mmode == MM_ADD ? TR("Запустить", "Start") : TR("Начать тест", "Start test"),
+                GLYPH_PLAY, BTN_ACCENT, A.hv[HV_MOK], A.press.type == HT_MOK && hv->type == HT_MOK, false);
     R.opacity = 1.f;
 }
 
-static void modal_open(void)
+static void test_start_one(int run, bool append);
+
+static void modal_open_mode(int mode, int run)
 {
+    A.mmode = mode;
+    A.mrun = run;
     A.modal = true;
     A.modal_t = 0;
     A.hover.type = HT_NONE;
@@ -961,7 +1028,8 @@ static void modal_close(bool start)
     if (start) {
         // Gone at once: no fade-out drawn over the start of the test.
         A.modal_t = 0;
-        start_or_stop();
+        if (A.mmode == MM_FULL) start_or_stop();
+        else test_start_one(A.mrun, A.mmode == MM_ADD);
     }
     invalidate();
 }
@@ -1162,6 +1230,8 @@ static bool animate(f32 dt)
         else if (i == HV_PKOK) on = A.hover.type == HT_PKOK;
         else if (i == HV_PKCANCEL) on = A.hover.type == HT_PKCANCEL;
         else if (i == HV_HLREFRESH) on = A.hover.type == HT_HLREFRESH;
+        else if (i == HV_TABPLUS) on = A.hover.type == HT_TABPLUS;
+        else if (i == HV_RERUN) on = A.hover.type == HT_RERUN;
         else if (A.hover.type < countof(hv_of) && A.hover.type != HT_NONE) on = hv_of[A.hover.type] == i && A.hover.type != HT_PICK;
         if (i == HV_SLIDER && A.dragging) on = true;
         anim |= approach(&A.hv[i], on ? 1.f : 0.f, 22.f, dt);
@@ -1317,6 +1387,8 @@ static Hit hit_test(int mx, int my)
         if (in_b(&A.pick_box[i], x, y)) return (Hit){ HT_PICK, i };
     for (int i = 0; i < A.ntabs; i++)
         if (in_b(&A.tabs[i], x, y)) return (Hit){ HT_TAB, i };
+    if (A.tab_plus.w > 0 && in_b(&A.tab_plus, x, y)) return (Hit){ HT_TABPLUS, -1 };
+    if (A.rerun_btn.w > 0 && in_b(&A.rerun_btn, x, y)) return (Hit){ HT_RERUN, -1 };
     if (A.ntabs && x >= A.body.x && x < A.body.x + A.body.w && y >= A.body.y && y < A.body.y + S(40)) {
         f32 pad = S(20), cpu_w = S(150), colw = (A.body.w - cpu_w - pad * 2) / (f32)countof(k_cols), rel = x - A.body.x - pad;
         if (rel < cpu_w) return (Hit){ HT_COLHDR, 0 };
@@ -1379,19 +1451,38 @@ static void set_tab(int i)
     invalidate();
 }
 
+// What every start does: the countdown timer and F4.
+static void test_started(void)
+{
+    A.note[0] = 0;
+    A.scroll = A.scroll_target = 0;
+    // Once a second for the countdown, and only while the window is in front (see app_loop).
+    SetTimer(A.hwnd, TIMER_TICK, 1000, NULL);
+    if (!RegisterHotKey(A.hwnd, HOTKEY_STOP, MOD_NOREPEAT, VK_F4)) log_msg("F4 is taken by another app: %lu", GetLastError());
+    invalidate();
+}
+
+static void test_start_one(int run, bool append)
+{
+    if (B.running || g_task_busy) return;
+    A.last_mode = append ? MM_ADD : MM_RERUN;
+    A.mrun = run;
+    bench_start_one(A.hwnd, run, append);
+    // a rerun shows its tab filling in; a new run gets its tab when it is done
+    if (!append) A.tab = run + 1;
+    test_started();
+}
+
 static void start_or_stop(void)
 {
     if (B.running) {
         InterlockedExchange(&B.cancel, 1);
     } else if (!g_task_busy) {
-        A.note[0] = 0;
+        A.last_mode = MM_FULL;
         bench_start(A.hwnd, A.runs, A.cpu.count);
         A.tab = 1;
         A.nbest = 0;
-        A.scroll = A.scroll_target = 0;
-        // Once a second for the countdown, and only while the window is in front (see app_loop).
-        SetTimer(A.hwnd, TIMER_TICK, 1000, NULL);
-        if (!RegisterHotKey(A.hwnd, HOTKEY_STOP, MOD_NOREPEAT, VK_F4)) log_msg("F4 is taken by another app: %lu", GetLastError());
+        test_started();
     }
     invalidate();
 }
@@ -1441,7 +1532,7 @@ static void mouse_up(int mx, int my)
             if (B.running) {
                 if (!B.cancel) start_or_stop();
             } else if (!g_task_busy) {
-                modal_open();
+                modal_open_mode(MM_FULL, 0);
             }
             break;
         case HT_MOK: modal_close(true); break;
@@ -1452,6 +1543,12 @@ static void mouse_up(int mx, int my)
             if (A.nbest) A.pk_mask = 1ull << A.best[0];
             break;
         case HT_PKCLEAR: A.pk_mask = 0; break;
+        case HT_TABPLUS:
+            if (!B.running && !g_task_busy && B.runs < BENCH_MAX_RUNS) modal_open_mode(MM_ADD, B.runs);
+            break;
+        case HT_RERUN:
+            if (!B.running && !g_task_busy) modal_open_mode(MM_RERUN, A.tab - 1);
+            break;
         case HT_COLHDR:
             if (A.sort_col == h.idx) {
                 A.sort_desc = !A.sort_desc;
@@ -1643,7 +1740,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             int t = A.hover.type;
             bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET || t == HT_MOK ||
                         t == HT_MCANCEL || t == HT_DONATE || t == HT_LANG || t == HT_MANUAL || t == HT_PKCELL || t == HT_PKBEST ||
-                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
+                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || t == HT_TABPLUS || t == HT_RERUN || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
             SetCursor(LoadCursorW(NULL, hand ? (LPCWSTR)IDC_HAND : (LPCWSTR)IDC_ARROW));
             return TRUE;
         }
@@ -1707,7 +1804,9 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         }
         refresh_best();
         refresh_binding();
-        A.tab = has_results() ? 0 : A.tab;
+        if (A.last_mode == MM_ADD) A.tab = B.runs > A.mrun ? A.mrun + 1 : A.tab;
+        else if (A.last_mode == MM_RERUN) A.tab = A.mrun + 1;
+        else A.tab = has_results() ? 0 : A.tab;
         set_page(PG_AFF);
         // The test ran fullscreen; bring the results up.
         if (IsIconic(h)) ShowWindow(h, SW_RESTORE);

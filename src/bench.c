@@ -30,6 +30,9 @@ static struct {
     WCHAR error[200];
     HANDLE thread;
     HWND notify;
+    // which runs this test measures: all of them, one again ("rerun"), or one more at the end ("+")
+    int first_run, last_run;
+    bool append;
 } B;
 
 // --- tools ---------------------------------------------------------------------------------------------------------
@@ -396,7 +399,7 @@ static DWORD WINAPI bench_thread(void *arg)
         // A test that was cut off (a crash, a power loss) is put right on the next start, see recover_thread.
         reg_set_u64(L"BenchRestore", affinity_get(g[0].id));
         reg_set_u64(L"BenchActive", 1);
-        for (int r = 0; r < B.runs && !B.cancel; r++)
+        for (int r = B.first_run; r <= B.last_run && !B.cancel; r++)
             for (int c = 0; c < B.ncpu && !B.cancel; c++) {
                 AcquireSRWLockExclusive(&B.lock);
                 B.run = r;
@@ -405,6 +408,14 @@ static DWORD WINAPI bench_thread(void *arg)
                 measure_cpu(r, c);
                 if (!B.cancel) InterlockedIncrement((volatile LONG *)&B.done_steps);
             }
+        if (B.append) {
+            // a run added with "+" becomes a tab when it went through; one stopped half way leaves nothing behind
+            AcquireSRWLockExclusive(&B.lock);
+            if (!B.cancel) B.runs = B.first_run + 1;
+            else memset(B.r[B.first_run], 0, sizeof B.r[0]);
+            ReleaseSRWLockExclusive(&B.lock);
+            results_save();
+        }
         set_phase(PH_RESTORE, 0);
         gpus_apply(bound_mask(), false, true);
         bench_end_mark();
@@ -424,6 +435,9 @@ static void bench_start(HWND notify, int runs, int ncpu)
     memset(B.r, 0, sizeof B.r);
     B.runs = CLAMP(runs, 1, BENCH_MAX_RUNS);
     B.ncpu = CLAMP(ncpu, 1, MAX_CPUS);
+    B.first_run = 0;
+    B.last_run = B.runs - 1;
+    B.append = false;
     B.run = B.cpu = 0;
     B.done_steps = 0;
     B.total_steps = B.runs * B.ncpu;
@@ -436,6 +450,32 @@ static void bench_start(HWND notify, int runs, int ncpu)
     B.thread = CreateThread(NULL, 0, bench_thread, NULL, 0, NULL);
     if (!B.thread) InterlockedExchange(&B.running, 0);
 }
+
+// One run on its own: run (an existing one) is measured again from scratch, or with append one more run goes after
+// the last. The other runs stay as they are.
+static void bench_start_one(HWND notify, int run, bool append)
+{
+    if (B.running || B.ncpu <= 0 || run < 0 || run >= BENCH_MAX_RUNS) return;
+    AcquireSRWLockExclusive(&B.lock);
+    memset(B.r[run], 0, sizeof B.r[run]);
+    B.first_run = B.last_run = run;
+    B.append = append;
+    B.run = run;
+    B.cpu = 0;
+    B.done_steps = 0;
+    B.total_steps = B.ncpu;
+    B.error[0] = 0;
+    B.cancel = 0;
+    B.notify = notify;
+    ReleaseSRWLockExclusive(&B.lock);
+    InterlockedExchange(&B.running, 1);
+    if (B.thread) CloseHandle(B.thread);
+    B.thread = CreateThread(NULL, 0, bench_thread, NULL, 0, NULL);
+    if (!B.thread) InterlockedExchange(&B.running, 0);
+}
+
+// The number of runs to show, counting one being added.
+static int bench_runs_shown(void) { return B.runs + (B.running && B.append ? 1 : 0); }
 
 // Seconds left, from the steps still to go and the time left in the current one.
 static f64 bench_eta(void)

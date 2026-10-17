@@ -17,6 +17,11 @@ static void init_paths(void)
     WCHAR pd[MAX_PATH];
     if (!GetEnvironmentVariableW(L"ProgramData", pd, MAX_PATH)) wcopy(pd, MAX_PATH, L"C:\\ProgramData");
     wfmt(g_data_dir, MAX_PATH, L"%s\\MixBooster", pd);
+#ifdef MB_DEV_BUILD
+    // the dev build can work on a copy of the data, to try the UI on made-up results
+    WCHAR alt[MAX_PATH];
+    if (GetEnvironmentVariableW(L"MB_DATA_DIR", alt, MAX_PATH)) wcopy(g_data_dir, MAX_PATH, alt);
+#endif
     CreateDirectoryW(g_data_dir, NULL);
 }
 

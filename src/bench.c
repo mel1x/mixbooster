@@ -75,11 +75,11 @@ static void lava_config(void)
                      GetSystemMetrics(SM_CYSCREEN), GetSystemMetrics(SM_CXSCREEN));
     wfmt(path, MAX_PATH, L"%s\\window.json", dir);
     write_file(path, buf, (DWORD)n);
-    // on a laptop with an iGPU too, the demo runs on the discrete GPU
+    // its FPS window stays on, as in AutoGpuAffinity; on a laptop with an iGPU too, the demo runs on the discrete GPU
     char cfg[512];
     n = snprintf(cfg, sizeof cfg,
                  "{\n    \"auto load\": true,\n    \"auto save\": false,\n    \"delta\": 20,\n    \"fixed delta\": false,\n"
-                 "    \"gui\": false,\n    \"paused\": false,\n    \"physical device\": %d,\n    \"save interval\": 300,\n"
+                 "    \"gui\": true,\n    \"paused\": false,\n    \"physical device\": %d,\n    \"save interval\": 300,\n"
                  "    \"speed\": 1.0,\n    \"v-sync\": false\n}\n",
                  vk_test_device());
     wfmt(path, MAX_PATH, L"%s\\config.json", dir);
@@ -211,8 +211,9 @@ static bool bench_avg(int cpu, CpuResult *out)
     return true;
 }
 
-// Ranks the cores by the averaged results. Smoothness matters more than the mean: the 1% and 0.1% lows count twice,
-// the average and the frame time spread once each, every one relative to the best core.
+// Ranks the cores by the averaged results, by the lows only: what matters for a GPU's interrupts is how even the
+// frames are, not the average. The 1% low weighs 40%, the 0.1% low 35%, the noisier 0.01% low 25%, each relative
+// to the best core.
 static int bench_best(int *best, int want)
 {
     CpuResult avg[MAX_CPUS];
@@ -228,8 +229,8 @@ static int bench_best(int *best, int want)
     for (int c = 0; c < B.ncpu; c++) {
         score[c] = -1;
         if (!avg[c].ok || top[M_AVG] <= 0) continue;
-        score[c] = (avg[c].v[M_AVG] / top[M_AVG] + 2.f * avg[c].v[M_LOW1] / top[M_LOW1] + 2.f * avg[c].v[M_LOW01] / top[M_LOW01] +
-                    (avg[c].v[M_STDEV] > 0 ? top[M_STDEV] / avg[c].v[M_STDEV] : 1.f)) / 6.f;
+        score[c] = 0.40f * avg[c].v[M_LOW1] / MAX(top[M_LOW1], 1e-3f) + 0.35f * avg[c].v[M_LOW01] / MAX(top[M_LOW01], 1e-3f) +
+                   0.25f * avg[c].v[M_LOW001] / MAX(top[M_LOW001], 1e-3f);
     }
     int n = 0;
     for (; n < want && n < have; n++) {

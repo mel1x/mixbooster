@@ -46,6 +46,7 @@ enum {
     HT_PKPANEL,
     HT_PKOUT,
     HT_HLREFRESH, // "Check again" on the health page
+    HT_COLHDR,    // a column header of the results table; idx: 0 the CPU, 1.. a metric column
 };
 
 // Hover animation slots.
@@ -106,6 +107,9 @@ static struct {
     f32 hw_scroll, hw_scroll_target, hw_scroll_v, hw_content_h, hw_sb_t;
     f32 hl_scroll, hl_scroll_target, hl_scroll_v, hl_content_h, hl_sb_t;
     f32 hw_fade, hl_fade;     // the data over its skeleton, 0..1
+    int sort_col;             // the results table: 0 by the CPU, k + 1 by the column k_cols[k]
+    bool sort_desc;
+    int order[MAX_CPUS];      // the CPUs in the order the table shows them
     f64 hw_t0, hl_t0;         // when a reading began: the skeleton stays a moment, so a fast one doesn't blink
     Box hl_refresh;
     bool picker;              // the manual core picker
@@ -127,6 +131,7 @@ static struct {
 } A;
 
 static void start_or_stop(void);
+static void ovl_update(void);
 
 static f32 S(f32 v) { return floorf(v * A.s + 0.5f); }
 static f32 SC(f32 v) { return v * A.s; }
@@ -602,7 +607,7 @@ static void draw_controls(void)
             bool ok = bench_avg(cpu, &avg);
             ReleaseSRWLockShared(&B.lock);
             if (ok) {
-                wfmt(st, countof(st), TR("1%% low %.0f · avg %.0f FPS", "1%% low %.0f · avg %.0f FPS"), avg.v[M_LOW1], avg.v[M_AVG]);
+                wfmt(st, countof(st), L"1%% low %.0f · 0.1%% low %.0f", avg.v[M_LOW1], avg.v[M_LOW01]);
                 text_draw_fit(FONT_TEXT, SC(12), tx, baseline_for(FONT_TEXT, SC(12), b->y + S(37)), tmax, st, -1, t->dim, false);
             }
         }
@@ -714,11 +719,20 @@ static void draw_table(void)
     int ncol = countof(k_cols);
     f32 cpu_w = S(150), pad = S(20), colw = (b->w - cpu_w - pad * 2) / (f32)ncol;
     f32 hy = b->y + S(20), hfs = SC(12.5f);
-    text_draw(FONT_TEXT_SEMIBOLD, hfs, b->x + pad, baseline_for(FONT_TEXT, hfs, hy), L"CPU", -1, t->dim);
-    for (int k = 0; k < ncol; k++)
-        text_draw_fit(FONT_TEXT_SEMIBOLD, hfs,
-                      MAX(b->x + pad + cpu_w + colw * (f32)k, b->x + pad + cpu_w + colw * (f32)(k + 1) - text_width(FONT_TEXT_SEMIBOLD, hfs, col_name(k_cols[k]), -1)),
-                      baseline_for(FONT_TEXT, hfs, hy), colw - S(6), col_name(k_cols[k]), -1, t->dim, false);
+    // A click on a header sorts by it, high to low first, then low to high; the sorted one is brighter, with an arrow.
+    u32 arrow = A.sort_desc ? 0xE70D : 0xE70E;
+    bool hcpu = A.hover.type == HT_COLHDR && A.hover.idx == 0;
+    f32 cx = text_draw(FONT_TEXT_SEMIBOLD, hfs, b->x + pad, baseline_for(FONT_TEXT, hfs, hy), L"CPU", -1,
+                       A.sort_col == 0 || hcpu ? t->text : t->dim);
+    if (A.sort_col == 0) text_draw_icon(arrow, SC(9), cx + S(10), hy, t->accent);
+    for (int k = 0; k < ncol; k++) {
+        bool sorted = A.sort_col == k + 1, hov = A.hover.type == HT_COLHDR && A.hover.idx == k + 1;
+        f32 right = b->x + pad + cpu_w + colw * (f32)(k + 1), lw = text_width(FONT_TEXT_SEMIBOLD, hfs, col_name(k_cols[k]), -1);
+        f32 lx = MAX(b->x + pad + cpu_w + colw * (f32)k + (sorted ? S(14) : 0), right - lw);
+        text_draw_fit(FONT_TEXT_SEMIBOLD, hfs, lx, baseline_for(FONT_TEXT, hfs, hy), right - lx, col_name(k_cols[k]), -1, sorted || hov ? t->text : t->dim,
+                      false);
+        if (sorted) text_draw_icon(arrow, SC(9), lx - S(9), hy, t->accent);
+    }
     r_rect(b->x + S(12), b->y + S(39), b->w - S(24), 1, t->sep, 0);
 
     AcquireSRWLockShared(&B.lock);
@@ -742,12 +756,36 @@ static void draw_table(void)
         for (int m = 0; m < M__COUNT; m++) top[m] = m == M_STDEV ? MIN(top[m], rows[i].v[m]) : MAX(top[m], rows[i].v[m]);
     }
 
+    // the order: by the CPU number, or by a column (CPUs without a value for it go last either way)
+    int n = B.ncpu;
+    for (int i = 0; i < n; i++) A.order[i] = i;
+    for (int i = 1; i < n; i++) {
+        int v = A.order[i], j = i - 1;
+        while (j >= 0) {
+            int u = A.order[j];
+            bool after;
+            if (A.sort_col == 0) {
+                after = A.sort_desc ? u < v : u > v;
+            } else {
+                int m = k_cols[A.sort_col - 1];
+                if (rows[u].ok != rows[v].ok) after = !rows[u].ok;
+                else if (!rows[u].ok || rows[u].v[m] == rows[v].v[m]) after = u > v;
+                else after = A.sort_desc ? rows[u].v[m] < rows[v].v[m] : rows[u].v[m] > rows[v].v[m];
+            }
+            if (!after) break;
+            A.order[j + 1] = u;
+            j--;
+        }
+        A.order[j + 1] = v;
+    }
+
     f32 off = A.rows.y - floorf(A.scroll + 0.5f), rh = S(38), fs = SC(13);
     r_set_clip(b->x, A.rows.y, b->x + b->w, A.rows.y + A.rows.h);
-    for (int i = 0; i < B.ncpu; i++) {
-        f32 y = off + rh * (f32)i, cy = y + rh * 0.5f;
+    for (int d = 0; d < n; d++) {
+        int i = A.order[d];
+        f32 y = off + rh * (f32)d, cy = y + rh * 0.5f;
         if (y + rh < A.rows.y || y > A.rows.y + A.rows.h) continue;
-        if (A.row_hov_idx == i && A.row_hov > 0) r_rect(b->x + S(6), y + S(2), b->w - S(12), rh - S(4), color_alpha(c->nav_hover, A.row_hov), S(6));
+        if (A.row_hov_idx == d && A.row_hov > 0) r_rect(b->x + S(6), y + S(2), b->w - S(12), rh - S(4), color_alpha(c->nav_hover, A.row_hov), S(6));
         bool cur = live && live_cpu == i;
         if (cur) {
             r_rect(b->x + S(6), y + S(2), b->w - S(12), rh - S(4), color_alpha(t->accent, 0.10f), S(6));
@@ -791,7 +829,7 @@ static void draw_table(void)
             }
             text_right(best ? FONT_TEXT_SEMIBOLD : FONT_TEXT, fs, rx, cy, v, best ? t->good : t->text);
         }
-        if (i + 1 < B.ncpu && !(A.row_hov_idx == i && A.row_hov > 0.5f)) r_rect(b->x + S(20), y + rh - 1, b->w - S(40), 1, color_alpha(t->sep, 0.6f), 0);
+        if (d + 1 < n && !(A.row_hov_idx == d && A.row_hov > 0.5f)) r_rect(b->x + S(20), y + rh - 1, b->w - S(40), 1, color_alpha(t->sep, 0.6f), 0);
     }
     r_set_clip(0, 0, (f32)A.W, (f32)A.H);
 
@@ -1279,6 +1317,12 @@ static Hit hit_test(int mx, int my)
         if (in_b(&A.pick_box[i], x, y)) return (Hit){ HT_PICK, i };
     for (int i = 0; i < A.ntabs; i++)
         if (in_b(&A.tabs[i], x, y)) return (Hit){ HT_TAB, i };
+    if (A.ntabs && x >= A.body.x && x < A.body.x + A.body.w && y >= A.body.y && y < A.body.y + S(40)) {
+        f32 pad = S(20), cpu_w = S(150), colw = (A.body.w - cpu_w - pad * 2) / (f32)countof(k_cols), rel = x - A.body.x - pad;
+        if (rel < cpu_w) return (Hit){ HT_COLHDR, 0 };
+        int k = (int)floorf((rel - cpu_w) / colw);
+        if (k >= 0 && k < countof(k_cols)) return (Hit){ HT_COLHDR, k + 1 };
+    }
     int r = row_at(y);
     if (r >= 0) return (Hit){ HT_ROW, r };
     return h;
@@ -1408,6 +1452,14 @@ static void mouse_up(int mx, int my)
             if (A.nbest) A.pk_mask = 1ull << A.best[0];
             break;
         case HT_PKCLEAR: A.pk_mask = 0; break;
+        case HT_COLHDR:
+            if (A.sort_col == h.idx) {
+                A.sort_desc = !A.sort_desc;
+            } else {
+                A.sort_col = h.idx;
+                A.sort_desc = true;
+            }
+            break;
         case HT_HLREFRESH:
             if (!HL.busy) health_refresh();
             break;
@@ -1591,7 +1643,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             int t = A.hover.type;
             bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET || t == HT_MOK ||
                         t == HT_MCANCEL || t == HT_DONATE || t == HT_LANG || t == HT_MANUAL || t == HT_PKCELL || t == HT_PKBEST ||
-                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
+                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
             SetCursor(LoadCursorW(NULL, hand ? (LPCWSTR)IDC_HAND : (LPCWSTR)IDC_ARROW));
             return TRUE;
         }
@@ -1631,6 +1683,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == TIMER_FLASH) KillTimer(h, TIMER_FLASH);
         else if (!B.running) KillTimer(h, TIMER_TICK);
+        if (wp == TIMER_TICK) ovl_update();
         invalidate();
         return 0;
     case WM_APP_HW:
@@ -1638,11 +1691,15 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         invalidate();
         return 0;
     case WM_APP_BENCH:
+        ovl_update();
+        invalidate();
+        return 0;
     case WM_APP_HEALTH:
         invalidate();
         return 0;
     case WM_APP_BENCH_DONE:
         KillTimer(h, TIMER_TICK);
+        ovl_update();
         UnregisterHotKey(h, HOTKEY_STOP);
         if (A.close_pending) {
             DestroyWindow(h);
@@ -1666,7 +1723,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (A.bound_mask) {
             A.note_bad = !wp;
             wfmt(A.note, countof(A.note),
-                 wp ? TR("Шина видеокарты переключится после перезагрузки", "The GPU's PCI bridge switches after a restart")
+                 wp ? TR("Видеокарта уже на ядре, её порт PCIe перейдёт после перезагрузки ПК", "The GPU is on the core now, its PCIe port follows after a restart")
                     : TR("Не удалось запустить службу, подробности в log.txt", "Couldn't start the service, see log.txt"));
         } else {
             A.note_bad = false;
@@ -1714,6 +1771,8 @@ static UINT window_dpi(HWND h)
     UINT d = f ? f(h) : 96;
     return d ? d : 96;
 }
+
+#include "overlay.c"
 
 static bool app_open(void)
 {

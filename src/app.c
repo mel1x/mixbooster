@@ -37,10 +37,18 @@ enum {
     HT_DONATE,    // the sidebar button
     HT_DON,       // the donation panel; idx: a wallet or DON_*
     HT_LANG,      // the language switch in the sidebar
+    HT_MANUAL,    // "Pick cores" next to the bind button
+    HT_PKCELL,    // the core picker; idx: the CPU
+    HT_PKBEST,
+    HT_PKCLEAR,
+    HT_PKOK,
+    HT_PKCANCEL,
+    HT_PKPANEL,
+    HT_PKOUT,
 };
 
 // Hover animation slots.
-enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_LANG, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
+enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_LANG, HV_MANUAL, HV_PKBEST, HV_PKCLEAR, HV_PKOK, HV_PKCANCEL, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
 
 // The sidebar pages, top to bottom.
 enum { PG_HW, PG_AFF, PG__COUNT };
@@ -76,7 +84,7 @@ static struct {
     bool dragging;
     int tab;                  // 0 = AVG, n = run n
     int best[2], nbest, pick;
-    int bound_cpu;            // -1 when not bound
+    u64 bound_mask;           // the cores the GPU is bound to, 0 when not bound
     bool svc_on;
     WCHAR note[160];          // a line under the bind button after binding or resetting
     bool note_bad;
@@ -92,6 +100,10 @@ static struct {
     int page;                 // PG_*
     f32 nav_y, nav_v, nav_hov[PG__COUNT];
     f32 hw_scroll, hw_scroll_target, hw_scroll_v, hw_content_h, hw_sb_t;
+    bool picker;              // the manual core picker
+    f32 picker_t;
+    u64 pk_mask;
+    Box pk_panel, pk_cell[MAX_CPUS], pk_best, pk_clear, pk_ok, pk_cancel, manual;
     bool modal;               // the dialog before the test
     f32 modal_t;
     Box m_panel, m_ok, m_cancel;
@@ -197,8 +209,8 @@ static void theme_update(void)
 static void refresh_binding(void)
 {
     u64 m = 0;
-    A.bound_cpu = reg_get_u64(L"GpuMask", &m) ? mask_cpu(m) : -1;
-    A.svc_on = A.bound_cpu >= 0 && svc_running();
+    A.bound_mask = reg_get_u64(L"GpuMask", &m) ? m : 0;
+    A.svc_on = A.bound_mask && svc_running();
 }
 
 static void refresh_best(void)
@@ -349,8 +361,15 @@ static void layout(void)
     A.right_x = lx + A.left_w + S(44);
     f32 rw = x1 - S(22) - A.right_x, tw = floorf((rw - S(10)) * 0.5f);
     for (int i = 0; i < 2; i++) A.pick_box[i] = (Box){ A.right_x + (tw + S(10)) * (f32)i, A.card.y + S(44), tw, S(54) };
-    A.bind = (Box){ A.right_x, A.card.y + S(106), S(214), S(34) };
-    A.reset = (Box){ A.bind.x + A.bind.w + S(8), A.bind.y, S(112), S(34) };
+    A.bind = (Box){ A.right_x, A.card.y + S(106), S(206), S(34) };
+    // without results the picker button stands alone where the bind button goes
+    A.manual = A.nbest ? (Box){ A.bind.x + A.bind.w + S(8), A.bind.y, S(132), S(34) } : (Box){ A.right_x, A.bind.y, S(196), S(34) };
+    {
+        // "Reset" sits right of the status line in the card's header row
+        f32 rr = x1 - S(22), fs = SC(12.5f);
+        f32 lw = text_width(FONT_TEXT_SEMIBOLD, fs, TR("Сбросить", "Reset"), -1);
+        A.reset = (Box){ rr - lw - S(8), A.card.y + S(30) - S(13), lw + S(16), S(26) };
+    }
 
     f32 ty = A.card.y + A.card.h + S(18);
     A.strip = (Box){ x0, ty, cw, S(44) };
@@ -519,13 +538,19 @@ static void draw_controls(void)
 
     // right: the two best cores and the bind button
     text_draw(FONT_TEXT, fs, rx, baseline_for(FONT_TEXT, fs, top), TR("Лучшие ядра", "Best cores"), -1, t->text);
-    if (A.bound_cpu >= 0) {
-        WCHAR s2[96];
-        wfmt(s2, countof(s2), A.svc_on ? TR("Привязано к CPU %d", "Bound to CPU %d") : TR("CPU %d · служба не запущена", "CPU %d · service stopped"),
-             A.bound_cpu);
-        f32 sfs = SC(12.5f), sw = text_width(FONT_TEXT, sfs, s2, -1), dot = S(8);
-        text_right(FONT_TEXT, sfs, rr, top, s2, t->dim);
-        r_rect(rr - sw - S(8) - dot, floorf(top - dot * 0.5f), dot, dot, A.svc_on ? t->good : t->warn, dot * 0.5f);
+    if (A.bound_mask) {
+        WCHAR s2[160], mt[120];
+        mask_text(A.bound_mask, mt, countof(mt));
+        wfmt(s2, countof(s2), A.svc_on ? TR("Привязано к %s", "Bound to %s") : TR("%s · служба не запущена", "%s · service stopped"), mt);
+        f32 sfs = SC(12.5f), dot = S(8), lr = A.reset.x - S(6);
+        bool busy = g_task_busy != 0;
+        f32 rh = A.hv[HV_RESET];
+        if (rh > 0 && !busy) r_rect(A.reset.x, A.reset.y, A.reset.w, A.reset.h, color_alpha(c->ctl_hover, rh), S(6));
+        text_center(FONT_TEXT_SEMIBOLD, sfs, A.reset.x + A.reset.w * 0.5f, top, TR("Сбросить", "Reset"),
+                    busy ? t->faint : color_mix(t->accent, t->text, rh * 0.3f));
+        f32 sw = MIN(text_width(FONT_TEXT, sfs, s2, -1), lr - rx - S(140));
+        text_draw_fit(FONT_TEXT, sfs, lr - sw, baseline_for(FONT_TEXT, sfs, top), sw + 1, s2, -1, t->dim, false);
+        r_rect(lr - sw - S(8) - dot, floorf(top - dot * 0.5f), dot, dot, A.svc_on ? t->good : t->warn, dot * 0.5f);
     }
     if (B.error[0]) {
         text_draw_fit(FONT_TEXT, SC(12.5f), rx, baseline_for(FONT_TEXT, SC(12.5f), cd->y + S(56)), rr - rx, B.error, -1, t->danger, false);
@@ -569,23 +594,18 @@ static void draw_controls(void)
             }
         }
         int cpu = A.best[A.pick];
-        bool same = A.bound_cpu == cpu && A.svc_on, busy = g_task_busy != 0;
+        bool same = A.bound_mask == 1ull << cpu && A.svc_on, busy = g_task_busy != 0;
         WCHAR lbl[64];
         if (busy) wcopy(lbl, countof(lbl), TR("Применяю…", "Applying…"));
         else if (same) wfmt(lbl, countof(lbl), TR("Привязано к CPU %d", "Bound to CPU %d"), cpu);
         else wcopy(lbl, countof(lbl), TR("Привязать видеокарту", "Bind the GPU"));
         draw_button(&A.bind, lbl, same ? 0xE73E : 0xE71B, BTN_ACCENT, A.hv[HV_BIND], A.press.type == HT_BIND && h->type == HT_BIND, busy || same);
     }
-    f32 nx = A.bind.x;
-    if (A.bound_cpu >= 0) {
-        draw_button(&A.reset, TR("Сбросить", "Reset"), 0xE777, BTN_NEUTRAL, A.hv[HV_RESET], A.press.type == HT_RESET && h->type == HT_RESET,
-                    g_task_busy != 0);
-        nx = A.reset.x + A.reset.w;
-    } else if (A.nbest) {
-        nx = A.bind.x + A.bind.w;
-    }
+    draw_button(&A.manual, A.nbest ? TR("Вручную", "Manual") : TR("Выбрать ядра вручную", "Pick cores by hand"), 0xE70F, BTN_NEUTRAL, A.hv[HV_MANUAL],
+                A.press.type == HT_MANUAL && h->type == HT_MANUAL, g_task_busy != 0);
+    f32 nx = A.manual.x + A.manual.w;
     if (A.note[0]) {
-        f32 my = A.bind.y + A.bind.h * 0.5f, x = nx + (nx > A.bind.x ? S(14) : 0);
+        f32 my = A.bind.y + A.bind.h * 0.5f, x = nx + S(14);
         text_draw_fit(FONT_TEXT, SC(12), x, baseline_for(FONT_TEXT, SC(12), my), rr - x, A.note, -1, A.note_bad ? t->danger : t->dim, false);
     }
 }
@@ -740,7 +760,7 @@ static void draw_table(void)
             text_center(FONT_TEXT_SEMIBOLD, SC(10.5f), x + bw * 0.5f, cy, L"E", t->dim);
             x += bw + S(6);
         }
-        if (A.bound_cpu == i) text_draw_icon(0xE71B, SC(13), x + S(7), cy, A.svc_on ? t->good : t->warn);
+        if ((A.bound_mask >> i) & 1) text_draw_icon(0xE71B, SC(13), x + S(7), cy, A.svc_on ? t->good : t->warn);
 
         for (int k = 0; k < ncol; k++) {
             int m = k_cols[k];
@@ -895,6 +915,113 @@ static void modal_close(bool start)
     invalidate();
 }
 
+
+// --- the manual core picker ----------------------------------------------------------------------------------------
+// For someone who knows the cores they want before a test, or wants others than the two the test suggests.
+
+static int picker_cols(void) { return A.cpu.count <= 12 ? 6 : 8; }
+
+// Lays the dialog out; with draw set it also draws it.
+static void picker_pass(bool draw)
+{
+    const Theme *t = &A.th;
+    const Colors *c = &A.c;
+    f32 w = MIN(S(640), (f32)A.W - S(40)), pad = S(28), gap = S(8);
+    const WCHAR *desc = TR("Отметьте одно или несколько ядер. Обычно лучше одно ядро и не CPU 0: на нём Windows обрабатывает большую часть "
+                           "системных прерываний.",
+                           "Tick one core or several. One core is usually best, and not CPU 0: Windows handles most system interrupts there.");
+    f32 dfs = SC(13), lh = S(19);
+    int dl = text_wrap(FONT_TEXT, dfs, 0, 0, w - pad * 2, lh, desc, 0, false);
+    int cols = picker_cols(), rows = (A.cpu.count + cols - 1) / cols;
+    f32 cw = floorf((w - pad * 2 - gap * (f32)(cols - 1)) / (f32)cols), ch = S(58);
+    f32 grid_y = pad + S(40) + S(14) + lh * (f32)dl + S(16);
+    f32 h = grid_y + (ch + gap) * (f32)rows - gap + S(16) + S(30) + S(36) + S(34) + pad;
+    f32 k = ease_out_cubic(A.picker_t);
+    f32 x = floorf(((f32)A.W - w) * 0.5f), y = floorf(((f32)A.H - h) * 0.5f + (1.f - k) * S(12));
+    A.pk_panel = (Box){ x, y, w, h };
+    for (int i = 0; i < A.cpu.count; i++)
+        A.pk_cell[i] = (Box){ x + pad + (cw + gap) * (f32)(i % cols), y + grid_y + (ch + gap) * (f32)(i / cols), cw, ch };
+    f32 qy = y + grid_y + (ch + gap) * (f32)rows - gap + S(16);
+    A.pk_best = (Box){ x + pad, qy, A.nbest ? S(170) : 0, S(30) };
+    A.pk_clear = (Box){ x + pad + (A.nbest ? S(178) : 0), qy, S(110), S(30) };
+    A.pk_ok = (Box){ x + w - pad - S(150), y + h - pad - S(34), S(150), S(34) };
+    A.pk_cancel = (Box){ A.pk_ok.x - S(8) - S(110), A.pk_ok.y, S(110), S(34) };
+    if (!draw) return;
+
+    R.opacity = k;
+    r_rect(0, 0, (f32)A.W, (f32)A.H, c->overlay, 0);
+    r_rect_ex(x, y + S(8), w, h, c->shadow, S(12), 0, S(24));
+    r_rect(x, y, w, h, t->dark ? RGBA(43, 43, 46, 255) : RGBA(251, 251, 252, 255), S(12));
+    r_rect_ex(x, y, w, h, c->pop_border, S(12), 1.f, 0);
+    f32 cy = y + pad + S(18), ic = S(36);
+    r_rect(x + pad, cy - ic * 0.5f, ic, ic, color_alpha(t->accent, 0.18f), S(9));
+    text_draw_icon(0xEEA1, SC(17), x + pad + ic * 0.5f, cy, t->accent);
+    text_draw(FONT_TEXT_SEMIBOLD, SC(19), x + pad + ic + S(14), baseline_for(FONT_TEXT_SEMIBOLD, SC(19), cy), TR("Ядра для видеокарты", "Cores for the GPU"),
+              -1, t->text);
+    text_wrap(FONT_TEXT, dfs, x + pad, baseline_for(FONT_TEXT, dfs, y + pad + S(40) + S(14) + lh * 0.5f), w - pad * 2, lh, desc, t->dim, true);
+
+    for (int i = 0; i < A.cpu.count; i++) {
+        Box *b = &A.pk_cell[i];
+        bool on = (A.pk_mask >> i) & 1, hov = A.hover.type == HT_PKCELL && A.hover.idx == i;
+        u32 bg = on ? color_alpha(t->accent, 0.18f) : hov ? c->ctl_hover : c->ctl;
+        r_rect(b->x, b->y, b->w, b->h, bg, S(8));
+        r_rect_ex(b->x, b->y, b->w, b->h, on ? t->accent : c->ctl_border, S(8), on ? S(1.5f) : 1.f, 0);
+        WCHAR nm[16], sub[48];
+        wfmt(nm, countof(nm), L"CPU %d", i);
+        text_draw(FONT_TEXT_SEMIBOLD, SC(13.5f), b->x + S(12), baseline_for(FONT_TEXT_SEMIBOLD, SC(13.5f), b->y + S(20)), nm, -1, t->text);
+        // the physical core, and what is special about this one
+        int n = wfmt(sub, countof(sub), TR("ядро %d", "core %d"), A.cpu.core[i]);
+        if (A.cpu.hybrid && A.cpu.eff[i] == 0 && n >= 0) n += wfmt(sub + n, countof(sub) - n, L" · E");
+        for (int r = 0; r < A.nbest && n >= 0; r++)
+            if (A.best[r] == i) n += wfmt(sub + n, countof(sub) - n, r ? TR(" · топ 2", " · top 2") : TR(" · топ 1", " · top 1"));
+        text_draw_fit(FONT_TEXT, SC(11.5f), b->x + S(12), baseline_for(FONT_TEXT, SC(11.5f), b->y + S(40)), b->w - S(20), sub, -1, t->dim, false);
+        if (on) {
+            f32 d = S(18), dx = b->x + b->w - S(8) - d, dy = b->y + S(8);
+            r_rect(dx, dy, d, d, t->accent, d * 0.5f);
+            text_draw_icon(0xE73E, SC(10), dx + d * 0.5f, dy + d * 0.5f, t->on_accent);
+        }
+    }
+    if (A.nbest)
+        draw_button(&A.pk_best, TR("Лучшее по тесту", "Best from the test"), 0xE735, BTN_NEUTRAL, A.hv[HV_PKBEST],
+                    A.press.type == HT_PKBEST && A.hover.type == HT_PKBEST, false);
+    draw_button(&A.pk_clear, TR("Очистить", "Clear"), 0, BTN_NEUTRAL, A.hv[HV_PKCLEAR], A.press.type == HT_PKCLEAR && A.hover.type == HT_PKCLEAR,
+                !A.pk_mask);
+
+    r_rect(x + S(1), A.pk_ok.y - S(18), w - S(2), 1, t->sep, 0);
+    WCHAR sel[160], mt[120];
+    mask_text(A.pk_mask, mt, countof(mt));
+    if (A.pk_mask) wfmt(sel, countof(sel), TR("Выбрано: %s", "Selected: %s"), mt);
+    else wcopy(sel, countof(sel), TR("Ничего не выбрано", "Nothing selected"));
+    f32 my = A.pk_ok.y + A.pk_ok.h * 0.5f;
+    text_draw_fit(FONT_TEXT, SC(12.5f), x + pad, baseline_for(FONT_TEXT, SC(12.5f), my), A.pk_cancel.x - x - pad - S(12), sel, -1, t->dim, false);
+    bool same = A.pk_mask && A.pk_mask == A.bound_mask && A.svc_on;
+    draw_button(&A.pk_cancel, TR("Отмена", "Cancel"), 0, BTN_NEUTRAL, A.hv[HV_PKCANCEL], A.press.type == HT_PKCANCEL && A.hover.type == HT_PKCANCEL,
+                false);
+    draw_button(&A.pk_ok, same ? TR("Уже привязано", "Already bound") : TR("Привязать", "Bind"), same ? 0xE73E : 0xE71B, BTN_ACCENT, A.hv[HV_PKOK],
+                A.press.type == HT_PKOK && A.hover.type == HT_PKOK, !A.pk_mask || same || g_task_busy);
+    R.opacity = 1.f;
+}
+
+static void picker_open(void)
+{
+    // start from what the GPU is bound to, else from the test's best core
+    A.pk_mask = A.bound_mask ? A.bound_mask : A.nbest ? 1ull << A.best[A.pick] : 0;
+    A.picker = true;
+    A.picker_t = 0;
+    A.hover.type = HT_NONE;
+    invalidate();
+}
+
+static void picker_close(bool bind)
+{
+    A.picker = false;
+    if (bind && A.pk_mask && !g_task_busy) {
+        A.note[0] = 0;
+        task_start(A.hwnd, true, A.pk_mask);
+    }
+    invalidate();
+}
+
 #include "donate.c"
 #include "hwpage.c"
 
@@ -927,6 +1054,7 @@ static void draw_all(void)
     }
     R.opacity = 1.f;
     if (A.modal || A.modal_t > 0) modal_pass(true);
+    if (A.picker || A.picker_t > 0) picker_pass(true);
     if (D.open) draw_donate();
     confetti_draw();
 
@@ -967,6 +1095,11 @@ static bool animate(f32 dt)
         else if (i == HV_MOK || i == HV_MCANCEL) on = A.hover.type == (i == HV_MOK ? HT_MOK : HT_MCANCEL);
         else if (i == HV_DONATE) on = A.hover.type == HT_DONATE;
         else if (i == HV_LANG) on = A.hover.type == HT_LANG;
+        else if (i == HV_MANUAL) on = A.hover.type == HT_MANUAL;
+        else if (i == HV_PKBEST) on = A.hover.type == HT_PKBEST;
+        else if (i == HV_PKCLEAR) on = A.hover.type == HT_PKCLEAR;
+        else if (i == HV_PKOK) on = A.hover.type == HT_PKOK;
+        else if (i == HV_PKCANCEL) on = A.hover.type == HT_PKCANCEL;
         else if (A.hover.type < countof(hv_of) && A.hover.type != HT_NONE) on = hv_of[A.hover.type] == i && A.hover.type != HT_PICK;
         if (i == HV_SLIDER && A.dragging) on = true;
         anim |= approach(&A.hv[i], on ? 1.f : 0.f, 22.f, dt);
@@ -995,6 +1128,7 @@ static bool animate(f32 dt)
     bool sb_on = max_scroll() > 0 && in_b(&A.body, (f32)A.mx, (f32)A.my);
     anim |= approach(&A.sb_t, sb_on ? 1.f : 0.f, sb_on ? 20.f : 7.f, dt);
     anim |= approach(&A.modal_t, A.modal ? 1.f : 0.f, A.modal ? 14.f : 18.f, dt);
+    anim |= approach(&A.picker_t, A.picker ? 1.f : 0.f, A.picker ? 14.f : 18.f, dt);
     Box nb;
     nav_box(A.page, &nb);
     anim |= spring_step(&A.nav_y, &A.nav_v, nb.y, 26.f, dt);
@@ -1065,6 +1199,16 @@ static Hit hit_test(int mx, int my)
         }
         return h;
     }
+    if (A.picker) {
+        picker_pass(false);
+        if (in_b(&A.pk_ok, x, y)) return (Hit){ HT_PKOK, -1 };
+        if (in_b(&A.pk_cancel, x, y)) return (Hit){ HT_PKCANCEL, -1 };
+        if (A.nbest && in_b(&A.pk_best, x, y)) return (Hit){ HT_PKBEST, -1 };
+        if (in_b(&A.pk_clear, x, y)) return (Hit){ HT_PKCLEAR, -1 };
+        for (int i = 0; i < A.cpu.count; i++)
+            if (in_b(&A.pk_cell[i], x, y)) return (Hit){ HT_PKCELL, i };
+        return (Hit){ in_b(&A.pk_panel, x, y) ? HT_PKPANEL : HT_PKOUT, -1 };
+    }
     if (A.modal) {
         modal_pass(false);
         h.type = in_b(&A.m_ok, x, y) ? HT_MOK : in_b(&A.m_cancel, x, y) ? HT_MCANCEL : in_b(&A.m_panel, x, y) ? HT_MPANEL : HT_MOUT;
@@ -1090,7 +1234,8 @@ static Hit hit_test(int mx, int my)
     if (!B.running && in_b(&sl, x, y)) h.type = HT_SLIDER;
     else if (in_b(&A.start, x, y)) h.type = HT_START;
     else if (!B.running && A.nbest && in_b(&A.bind, x, y)) h.type = HT_BIND;
-    else if (!B.running && A.bound_cpu >= 0 && in_b(&A.reset, x, y)) h.type = HT_RESET;
+    else if (!B.running && A.bound_mask && in_b(&A.reset, x, y)) h.type = HT_RESET;
+    else if (!B.running && in_b(&A.manual, x, y)) h.type = HT_MANUAL;
     if (h.type) return h;
     for (int i = 0; !B.running && i < A.nbest; i++)
         if (in_b(&A.pick_box[i], x, y)) return (Hit){ HT_PICK, i };
@@ -1176,6 +1321,7 @@ static void mouse_down(int mx, int my)
     case HT_DONATE: don_open(); break;
     case HT_NAV: set_page(h.idx); break;
     case HT_LANG: lang_switch(); break;
+    case HT_PKCELL: A.pk_mask ^= 1ull << h.idx; break;
     case HT_SLIDER:
         A.dragging = true;
         slider_set(mx);
@@ -1201,12 +1347,24 @@ static void mouse_up(int mx, int my)
             }
             break;
         case HT_MOK: modal_close(true); break;
+        case HT_MANUAL:
+            if (!g_task_busy) picker_open();
+            break;
+        case HT_PKBEST:
+            if (A.nbest) A.pk_mask = 1ull << A.best[0];
+            break;
+        case HT_PKCLEAR: A.pk_mask = 0; break;
+        case HT_PKOK:
+            if (A.pk_mask && !(A.pk_mask == A.bound_mask && A.svc_on)) picker_close(true);
+            break;
+        case HT_PKCANCEL:
+        case HT_PKOUT: picker_close(false); break;
         case HT_MCANCEL:
         case HT_MOUT: modal_close(false); break;
         case HT_BIND:
-            if (!g_task_busy && A.nbest && !(A.bound_cpu == A.best[A.pick] && A.svc_on)) {
+            if (!g_task_busy && A.nbest && !(A.bound_mask == 1ull << A.best[A.pick] && A.svc_on)) {
                 A.note[0] = 0;
-                task_start(A.hwnd, true, A.best[A.pick]);
+                task_start(A.hwnd, true, 1ull << A.best[A.pick]);
             }
             break;
         case HT_RESET:
@@ -1230,6 +1388,11 @@ static void key_down(UINT vk)
         else if (vk == VK_DOWN || vk == VK_NEXT) D.scroll_target += S(vk == VK_NEXT ? 240.f : 48.f);
         else if (vk == VK_UP || vk == VK_PRIOR) D.scroll_target -= S(vk == VK_PRIOR ? 240.f : 48.f);
         invalidate();
+        return;
+    }
+    if (A.picker) {
+        if (vk == VK_ESCAPE) picker_close(false);
+        else if (vk == VK_RETURN && A.pk_mask && !(A.pk_mask == A.bound_mask && A.svc_on)) picker_close(true);
         return;
     }
     if (A.modal) {
@@ -1291,7 +1454,7 @@ static LRESULT nc_hit(HWND h, LPARAM lp)
         winbtn_box(i, &r);
         if (in_b(&r, x, y)) return HTCLIENT;
     }
-    if (A.modal || D.open) return HTCLIENT;
+    if (A.modal || A.picker || D.open) return HTCLIENT;
     if (y < A.card.y - S(8) && x >= sb_x() + sb_w()) return HTCAPTION;
     if (x < sb_x() + sb_w() && y < sb_x() + S(72)) return HTCAPTION;
     return HTCLIENT;
@@ -1369,7 +1532,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (LOWORD(lp) == HTCLIENT) {
             int t = A.hover.type;
             bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET || t == HT_MOK ||
-                        t == HT_MCANCEL || t == HT_DONATE || t == HT_LANG || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
+                        t == HT_MCANCEL || t == HT_DONATE || t == HT_LANG || t == HT_MANUAL || t == HT_PKCELL || t == HT_PKBEST ||
+                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
             SetCursor(LoadCursorW(NULL, hand ? (LPCWSTR)IDC_HAND : (LPCWSTR)IDC_ARROW));
             return TRUE;
         }
@@ -1431,9 +1595,11 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         invalidate();
         return 0;
     case WM_APP_TASK_DONE: {
-        bool was_bound = A.bound_cpu >= 0;
+        bool was_bound = A.bound_mask != 0;
         refresh_binding();
-        if (A.bound_cpu >= 0) {
+        // the parts page shows where the GPU interrupts go
+        hw_start(h);
+        if (A.bound_mask) {
             A.note_bad = !wp;
             wfmt(A.note, countof(A.note),
                  wp ? TR("Шина видеокарты переключится после перезагрузки", "The GPU's PCI bridge switches after a restart")

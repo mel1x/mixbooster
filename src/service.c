@@ -190,18 +190,18 @@ static void svc_remove(void)
 // --- the bind and reset actions, on a worker thread ----------------------------------------------------------------
 
 static volatile LONG g_task_busy;
-static int g_task_cpu;
+static u64 g_task_mask;
 static HWND g_task_notify;
 
 static DWORD WINAPI bind_thread(void *arg)
 {
     bool bind = arg != NULL, ok = true;
     if (bind) {
-        u64 mask = 1ull << g_task_cpu;
+        u64 mask = g_task_mask;
         reg_set_u64(L"GpuMask", mask);
         gpus_apply(mask, true, false);
         ok = svc_install();
-        log_msg("bound the GPU to CPU %d, service %s", g_task_cpu, ok ? "running" : "failed");
+        log_msg("bound the GPU to 0x%llx, service %s", (unsigned long long)mask, ok ? "running" : "failed");
     } else {
         svc_remove();
         reg_delete(L"GpuMask");
@@ -214,12 +214,12 @@ static DWORD WINAPI bind_thread(void *arg)
     return 0;
 }
 
-static void task_start(HWND notify, bool bind, int cpu)
+static void task_start(HWND notify, bool bind, u64 mask)
 {
     if (g_task_busy) return;
     InterlockedExchange(&g_task_busy, 1);
     g_task_notify = notify;
-    g_task_cpu = cpu;
+    g_task_mask = mask;
     HANDLE t = CreateThread(NULL, 0, bind_thread, bind ? (void *)1 : NULL, 0, NULL);
     if (t) CloseHandle(t);
     else InterlockedExchange(&g_task_busy, 0);

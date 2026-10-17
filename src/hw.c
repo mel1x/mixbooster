@@ -301,79 +301,117 @@ static DWORD dev_u32(HDEVINFO set, SP_DEVINFO_DATA *d, const DEVPROPKEY *key)
     return v;
 }
 
+typedef struct GpuInfo {
+    WCHAR id[200], name[128], ver[64], date[32], amd[48];
+    u64 vram;
+    DWORD speed, width, max_width;
+    bool integrated;
+} GpuInfo;
+
+static const WCHAR *gpu_vendor(const WCHAR *id)
+{
+    return wcsstr(id, L"VEN_10DE") ? L"NVIDIA" : wcsstr(id, L"VEN_1002") ? L"AMD" : wcsstr(id, L"VEN_8086") ? L"Intel" : L"";
+}
+
+// The driver version as each vendor shows it: NVIDIA's own number hides in the last digits of the Windows one
+// (32.0.15.6094 -> 560.94), AMD writes its Adrenalin version next to the driver, Intel uses the Windows one as is.
+static void gpu_driver_text(const GpuInfo *g, WCHAR *out, int cap)
+{
+    int a, b, c, d;
+    if (!wcscmp(gpu_vendor(g->id), L"NVIDIA") && swscanf(g->ver, L"%d.%d.%d.%d", &a, &b, &c, &d) == 4) {
+        int nv = (c % 10) * 10000 + d;
+        wfmt(out, cap, L"%d.%02d  (%s)", nv / 100, nv % 100, g->ver);
+    } else if (g->amd[0]) {
+        wfmt(out, cap, L"Adrenalin %s  (%s)", g->amd, g->ver);
+    } else {
+        wcopy(out, cap, g->ver);
+    }
+}
+
 static void hw_gpu(void)
 {
     HwCard *c = &HW.card[HWC_GPU];
     c->glyph = 0xF211;
     wcopy(c->cat, countof(c->cat), TR("Видеокарта", "Graphics"));
-    HDEVINFO set = SetupDiGetClassDevsW(&k_class_display, NULL, NULL, DIGCF_PRESENT);
-    u64 vram_main = 0;
+    GpuInfo gi[MAX_GPUS];
     int n = 0;
+    HDEVINFO set = SetupDiGetClassDevsW(&k_class_display, NULL, NULL, DIGCF_PRESENT);
     SP_DEVINFO_DATA d = { sizeof d };
-    for (DWORD i = 0; set != INVALID_HANDLE_VALUE && SetupDiEnumDeviceInfo(set, i, &d); i++) {
-        WCHAR id[200], name[128];
-        if (!SetupDiGetDeviceInstanceIdW(set, &d, id, countof(id), NULL) || !wstarts_with_i(id, L"PCI\\")) continue;
-        if (!SetupDiGetDeviceRegistryPropertyW(set, &d, SPDRP_FRIENDLYNAME, NULL, (BYTE *)name, sizeof name - 2, NULL) &&
-            !SetupDiGetDeviceRegistryPropertyW(set, &d, SPDRP_DEVICEDESC, NULL, (BYTE *)name, sizeof name - 2, NULL))
+    for (DWORD i = 0; set != INVALID_HANDLE_VALUE && n < MAX_GPUS && SetupDiEnumDeviceInfo(set, i, &d); i++) {
+        GpuInfo *g = &gi[n];
+        memset(g, 0, sizeof *g);
+        if (!SetupDiGetDeviceInstanceIdW(set, &d, g->id, countof(g->id), NULL) || !wstarts_with_i(g->id, L"PCI\\")) continue;
+        if (!SetupDiGetDeviceRegistryPropertyW(set, &d, SPDRP_FRIENDLYNAME, NULL, (BYTE *)g->name, sizeof g->name - 2, NULL) &&
+            !SetupDiGetDeviceRegistryPropertyW(set, &d, SPDRP_DEVICEDESC, NULL, (BYTE *)g->name, sizeof g->name - 2, NULL))
             continue;
-        WCHAR ver[64] = L"", date[32] = L"";
-        u64 vram = 0;
         HKEY k = SetupDiOpenDevRegKey(set, &d, DICS_FLAG_GLOBAL, 0, DIREG_DRV, KEY_READ);
         if (k != INVALID_HANDLE_VALUE) {
-            DWORD sz = sizeof ver;
-            RegGetValueW(k, NULL, L"DriverVersion", RRF_RT_REG_SZ, NULL, ver, &sz);
-            sz = sizeof date;
-            RegGetValueW(k, NULL, L"DriverDate", RRF_RT_REG_SZ, NULL, date, &sz);
-            sz = sizeof vram;
-            if (RegGetValueW(k, NULL, L"HardwareInformation.qwMemorySize", RRF_RT_REG_QWORD | RRF_RT_REG_BINARY, NULL, &vram, &sz) != ERROR_SUCCESS) {
+            DWORD sz = sizeof g->ver;
+            RegGetValueW(k, NULL, L"DriverVersion", RRF_RT_REG_SZ, NULL, g->ver, &sz);
+            sz = sizeof g->date;
+            RegGetValueW(k, NULL, L"DriverDate", RRF_RT_REG_SZ, NULL, g->date, &sz);
+            sz = sizeof g->amd;
+            RegGetValueW(k, NULL, L"RadeonSoftwareVersion", RRF_RT_REG_SZ, NULL, g->amd, &sz);
+            sz = sizeof g->vram;
+            if (RegGetValueW(k, NULL, L"HardwareInformation.qwMemorySize", RRF_RT_REG_QWORD | RRF_RT_REG_BINARY, NULL, &g->vram, &sz) != ERROR_SUCCESS) {
                 DWORD v32 = 0;
                 sz = sizeof v32;
                 if (RegGetValueW(k, NULL, L"HardwareInformation.MemorySize", RRF_RT_REG_DWORD | RRF_RT_REG_BINARY, NULL, &v32, &sz) == ERROR_SUCCESS)
-                    vram = v32;
+                    g->vram = v32;
             }
             RegCloseKey(k);
         }
-        if (n++ == 0) {
-            wcopy(c->head, countof(c->head), name);
-            vram_main = vram;
-            const WCHAR *vend = wcsstr(id, L"VEN_10DE") ? L"NVIDIA" : wcsstr(id, L"VEN_1002") ? L"AMD" : wcsstr(id, L"VEN_8086") ? L"Intel" : L"";
-            WCHAR vs[32] = L"";
-            if (vram) fmt_size(vs, countof(vs), vram);
-            wfmt(c->sub, countof(c->sub), L"%s%s%s", vend, vend[0] && vs[0] ? L" · " : L"", vs);
-            if (vram) row_add(c, false, TR("Видеопамять", "Video memory"), L"%s", vs);
-            // NVIDIA's own driver number sits in the last digits of the Windows one: 32.0.15.6094 -> 560.94
-            int a, b, cc, dd;
-            if (ver[0] && wcscmp(vend, L"NVIDIA") == 0 && swscanf(ver, L"%d.%d.%d.%d", &a, &b, &cc, &dd) == 4) {
-                int nv = (cc % 10) * 10000 + dd;
-                row_add(c, false, TR("Драйвер", "Driver"), L"%d.%02d  (%s)", nv / 100, nv % 100, ver);
-            } else if (ver[0]) {
-                row_add(c, false, TR("Драйвер", "Driver"), L"%s", ver);
-            }
-            date_dmy(date, countof(date));
-            if (date[0]) row_add(c, false, TR("Дата драйвера", "Driver date"), L"%s", date);
-            DWORD sp = dev_u32(set, &d, &k_pci_speed), w = dev_u32(set, &d, &k_pci_width), mw = dev_u32(set, &d, &k_pci_max_width);
-            if (sp && w) {
-                if (mw && mw != w) row_add(c, false, TR("Шина", "Bus"), L"PCIe %d.0 x%lu (%s x%lu)", (int)sp, w, TR("макс.", "max"), mw);
-                else row_add(c, false, TR("Шина", "Bus"), L"PCIe %d.0 x%lu", (int)sp, w);
-            }
-            // where its interrupts go: the core from the GPU Affinity page, another tool's mask, or Windows' choice
-            u64 mask = affinity_get(id);
-            int bound = mask_cpu(mask);
-            if (bound >= 0) row_add(c, false, TR("Прерывания", "Interrupts"), L"CPU %d", bound);
-            else if (mask) row_add(c, false, TR("Прерывания", "Interrupts"), TR("маска 0x%llX", "mask 0x%llX"), (unsigned long long)mask);
-            else row_add(c, false, TR("Прерывания", "Interrupts"), L"%s", TR("Windows по умолчанию", "Windows default"));
-        } else {
-            row_add(c, true, name, L"%s", TR("ещё одна видеокарта", "another GPU"));
-        }
+        date_dmy(g->date, countof(g->date));
+        g->speed = dev_u32(set, &d, &k_pci_speed);
+        g->width = dev_u32(set, &d, &k_pci_width);
+        g->max_width = dev_u32(set, &d, &k_pci_max_width);
+        // An iGPU sits on the CPU's own bus 0 and has no PCIe link of its own.
+        DWORD bus = 0;
+        g->integrated = !g->width && SetupDiGetDeviceRegistryPropertyW(set, &d, SPDRP_BUSNUMBER, NULL, (BYTE *)&bus, sizeof bus, NULL) && bus == 0;
+        n++;
     }
     if (set != INVALID_HANDLE_VALUE) SetupDiDestroyDeviceInfoList(set);
-    if (!n) wcopy(c->head, countof(c->head), TR("Не найдена", "Not found"));
+    if (!n) {
+        wcopy(c->head, countof(c->head), TR("Не найдена", "Not found"));
+        return;
+    }
+    // The main one is the one with the most memory: the discrete card on a laptop with an iGPU too.
+    int m = 0;
+    for (int i = 1; i < n; i++)
+        if (gi[i].vram > gi[m].vram) m = i;
+    GpuInfo *g = &gi[m];
+    wcopy(c->head, countof(c->head), g->name);
+    WCHAR vs[32] = L"";
+    if (g->vram) fmt_size(vs, countof(vs), g->vram);
+    const WCHAR *vend = gpu_vendor(g->id);
+    wfmt(c->sub, countof(c->sub), L"%s%s%s%s", vend, vend[0] && vs[0] ? L" · " : L"", vs,
+         g->integrated ? TR(" · встроенная", " · integrated") : L"");
+    if (g->vram) row_add(c, false, g->integrated ? TR("Выделенная память", "Dedicated memory") : TR("Видеопамять", "Video memory"), L"%s", vs);
+    WCHAR dv[128];
+    gpu_driver_text(g, dv, countof(dv));
+    if (dv[0]) row_add(c, false, TR("Драйвер", "Driver"), L"%s", dv);
+    if (g->date[0]) row_add(c, false, TR("Дата драйвера", "Driver date"), L"%s", g->date);
+    if (g->speed && g->width) {
+        if (g->max_width && g->max_width != g->width)
+            row_add(c, false, TR("Шина", "Bus"), L"PCIe %d.0 x%lu (%s x%lu)", (int)g->speed, g->width, TR("макс.", "max"), g->max_width);
+        else
+            row_add(c, false, TR("Шина", "Bus"), L"PCIe %d.0 x%lu", (int)g->speed, g->width);
+    } else if (g->integrated) {
+        row_add(c, false, TR("Шина", "Bus"), L"%s", TR("встроена в процессор", "inside the CPU"));
+    }
+    // where its interrupts go: the cores from the GPU Affinity page, another tool's mask, or Windows' choice
+    u64 mask = affinity_get(g->id);
+    WCHAR mt[96];
+    mask_text(mask, mt, countof(mt));
+    row_add(c, false, TR("Прерывания", "Interrupts"), L"%s", mask ? mt : TR("Windows по умолчанию", "Windows default"));
+    for (int i = 0; i < n; i++)
+        if (i != m) row_add(c, true, gi[i].name, L"%s", gi[i].integrated ? TR("встроенная", "integrated") : TR("ещё одна видеокарта", "another GPU"));
 
     HwStat *s = &HW.stat[2];
     s->glyph = 0xF211;
-    if (vram_main) {
-        f64 gb = (f64)vram_main / (1024.0 * 1024 * 1024);
-        wfmt(s->value, countof(s->value), gb == floor(gb) ? L"%.0f" : L"%.1f", gb);
+    if (g->vram) {
+        f64 gb = (f64)g->vram / (1024.0 * 1024 * 1024);
+        wfmt(s->value, countof(s->value), gb == floor(gb) || gb >= 10 ? L"%.0f" : L"%.1f", gb);
     } else {
         wcopy(s->value, countof(s->value), L"-");
     }

@@ -5,6 +5,10 @@
 //   AssignmentSetOverride = KAFFINITY mask of the allowed logical processors
 // This is what AutoGpuAffinity and the Interrupt Affinity Policy tool write. A GPU picks the change up on a driver
 // restart; a bridge only on the next boot, since restarting it would take the GPU down with it.
+//
+// "The bridge" is every PCI bridge between the GPU and the CPU: usually one CPU root port (NVIDIA cards, AMD APUs), but
+// Radeon RX 6000/7000 cards carry their own PCIe switch, so their parent is a port on the card and the CPU's root port
+// sits two levels up. An Intel iGPU hangs right off the root complex and has no bridge at all.
 
 #define MAX_GPUS 4
 #define MAX_CPUS 64
@@ -12,7 +16,8 @@
 typedef struct GpuDev {
     WCHAR id[200];          // PCI\VEN_...
     WCHAR name[128];
-    WCHAR bridge[200];      // the parent PCI bridge, or empty
+    WCHAR bridge[4][200];   // the PCI bridges up to the root complex, nearest first
+    int nbridge;
 } GpuDev;
 
 static const GUID k_class_display = { 0x4d36e968, 0xe325, 0x11ce, { 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 } };
@@ -32,11 +37,13 @@ static int gpu_list(GpuDev *out, int cap)
         if (!SetupDiGetDeviceRegistryPropertyW(set, &d, SPDRP_FRIENDLYNAME, NULL, (BYTE *)g->name, sizeof g->name - sizeof(WCHAR), NULL) &&
             !SetupDiGetDeviceRegistryPropertyW(set, &d, SPDRP_DEVICEDESC, NULL, (BYTE *)g->name, sizeof g->name - sizeof(WCHAR), NULL))
             wcopy(g->name, countof(g->name), g->id);
-        DEVINST parent;
+        DEVINST cur = d.DevInst, parent;
         WCHAR pid[200];
-        if (CM_Get_Parent(&parent, d.DevInst, 0) == CR_SUCCESS && CM_Get_Device_IDW(parent, pid, countof(pid), 0) == CR_SUCCESS &&
-            wstarts_with_i(pid, L"PCI\\"))
-            wcopy(g->bridge, countof(g->bridge), pid);
+        while (g->nbridge < countof(g->bridge) && CM_Get_Parent(&parent, cur, 0) == CR_SUCCESS &&
+               CM_Get_Device_IDW(parent, pid, countof(pid), 0) == CR_SUCCESS && wstarts_with_i(pid, L"PCI\\")) {
+            wcopy(g->bridge[g->nbridge++], countof(g->bridge[0]), pid);
+            cur = parent;
+        }
         n++;
     }
     SetupDiDestroyDeviceInfoList(set);
@@ -133,10 +140,11 @@ static int gpus_apply(u64 mask, bool bridges, bool force)
     for (int i = 0; i < n; i++) {
         bool changed = affinity_get(g[i].id) != mask;
         if (changed) affinity_set(g[i].id, mask);
-        if (bridges && g[i].bridge[0] && affinity_get(g[i].bridge) != mask) {
-            affinity_set(g[i].bridge, mask);
-            log_msg("bridge %ls -> 0x%llx", g[i].bridge, (unsigned long long)mask);
-        }
+        for (int b = 0; bridges && b < g[i].nbridge; b++)
+            if (affinity_get(g[i].bridge[b]) != mask) {
+                affinity_set(g[i].bridge[b], mask);
+                log_msg("bridge %ls -> 0x%llx", g[i].bridge[b], (unsigned long long)mask);
+            }
         if (changed || force) {
             log_msg("gpu %ls -> 0x%llx", g[i].id, (unsigned long long)mask);
             if (device_restart(g[i].id)) restarted++;
@@ -152,7 +160,7 @@ static void bridges_clear(void)
     GpuDev g[MAX_GPUS];
     int n = gpu_list(g, MAX_GPUS);
     for (int i = 0; i < n; i++)
-        if (g[i].bridge[0]) affinity_set(g[i].bridge, 0);
+        for (int b = 0; b < g[i].nbridge; b++) affinity_set(g[i].bridge[b], 0);
 }
 
 typedef struct CpuInfo {
@@ -199,6 +207,25 @@ static void cpu_info(CpuInfo *ci)
     while (b > a && ci->name[b - 1] == ' ') b--;
     memmove(ci->name, ci->name + a, (size_t)(b - a) * sizeof(WCHAR));
     ci->name[b - a] = 0;
+}
+
+// "CPU 4", "CPU 2, 4", "CPU 0-3, 6".
+static void mask_text(u64 mask, WCHAR *out, int cap)
+{
+    int n = wfmt(out, cap, L"CPU ");
+    bool first = true;
+    for (int i = 0; i < 64 && n >= 0 && n < cap - 8; i++) {
+        if (!(mask >> i & 1)) continue;
+        int j = i;
+        while (j + 1 < 64 && (mask >> (j + 1) & 1)) j++;
+        int w = j - i >= 2 ? wfmt(out + n, cap - n, L"%s%d-%d", first ? L"" : L", ", i, j)
+                : j > i   ? wfmt(out + n, cap - n, L"%s%d, %d", first ? L"" : L", ", i, j)
+                          : wfmt(out + n, cap - n, L"%s%d", first ? L"" : L", ", i);
+        if (w < 0) break;
+        n += w;
+        first = false;
+        i = j;
+    }
 }
 
 static int mask_cpu(u64 mask)

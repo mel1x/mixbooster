@@ -63,9 +63,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline_a, int show)
     A.row_hov_idx = -1;
     refresh_best();
     refresh_binding();
-    if (A.bound_cpu >= 0)
-        for (int i = 0; i < A.nbest; i++)
-            if (A.best[i] == A.bound_cpu) A.pick = i;
+    for (int i = 0; i < A.nbest; i++)
+        if (A.bound_mask == 1ull << A.best[i]) A.pick = i;
 
     if (!app_open()) {
         MessageBoxW(NULL, TR("Не удалось создать окно (нужен Direct3D 11).", "Couldn't create the window (Direct3D 11 is required)."), L"MixBooster",

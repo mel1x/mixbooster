@@ -1,0 +1,39 @@
+#include <windows.h>
+#include "version.h"
+
+1 ICON "mixbooster.ico"
+#ifdef MB_DEV_BUILD
+// Development build: no elevation prompt, for looking at the UI (binding and the test need administrator rights).
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "mixbooster.dev.manifest"
+#else
+// Writes the GPU's registry policy and installs a service: needs administrator rights.
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "mixbooster.manifest"
+#endif
+
+// The benchmark tools, unpacked to %ProgramData%\MixBooster\bin on first use (see bench.c).
+101 RCDATA "../third_party/liblava/lava-triangle.exe"
+102 RCDATA "../third_party/liblava/res.zip"
+103 RCDATA "../third_party/presentmon/PresentMon.exe"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION MB_VER_MAJOR,MB_VER_MINOR,MB_VER_PATCH,0
+PRODUCTVERSION MB_VER_MAJOR,MB_VER_MINOR,MB_VER_PATCH,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "MixBooster"
+            VALUE "ProductName", "MixBooster"
+            VALUE "FileVersion", MB_VER_STR
+            VALUE "ProductVersion", MB_VER_STR
+            VALUE "OriginalFilename", "MixBooster.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

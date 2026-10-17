@@ -123,7 +123,16 @@ static void draw_hw_card(const Box *b, const HwCard *cd)
     f32 pad = S(18), isz = S(42);
     draw_icon_tile(b->x + pad, b->y + pad, isz, cd->glyph);
     f32 tx = b->x + pad + isz + S(14), tmax = b->x + b->w - tx - pad;
-    text_draw_fit(FONT_TEXT, SC(12), tx, floorf(b->y + S(28)), tmax, cd->cat, -1, t->dim, false);
+    text_draw_fit(FONT_TEXT, SC(12), tx, floorf(b->y + S(28)), tmax - (cd->badge[0] ? S(110) : 0), cd->cat, -1, t->dim, false);
+    if (cd->badge[0]) {
+        // the status pill on the health page: "Good · 98%"
+        u32 sc = cd->state == HS_BAD ? t->danger : cd->state == HS_WARN ? t->warn : t->good;
+        f32 bfs = SC(12), bw = text_width(FONT_TEXT_SEMIBOLD, bfs, cd->badge, -1) + S(20), bh = S(24);
+        f32 bx = b->x + b->w - pad - bw, by = b->y + pad;
+        r_rect(bx, by, bw, bh, color_alpha(sc, 0.16f), bh * 0.5f);
+        text_center(FONT_TEXT_SEMIBOLD, bfs, bx + bw * 0.5f, by + bh * 0.5f, cd->badge, sc);
+        tmax = bx - S(10) - tx;
+    }
     text_draw_fit(FONT_TEXT_SEMIBOLD, SC(15), tx, floorf(b->y + S(48)), tmax, cd->head, -1, t->text, false);
     if (cd->sub[0]) text_draw_fit(FONT_TEXT, SC(12.5f), tx, floorf(b->y + S(66)), tmax, cd->sub, -1, t->dim, false);
     if (!cd->nrows) return;
@@ -138,7 +147,8 @@ static void draw_hw_card(const Box *b, const HwCard *cd)
         f32 kmax = w - vw - S(16);
         text_draw_fit(FONT_TEXT, fs, b->x + pad, baseline_for(FONT_TEXT, fs, cy), kmax, r->k, -1, r->item ? t->text : t->dim, false);
         f32 vx = b->x + b->w - pad - vw;
-        text_draw_fit(FONT_TEXT, fs, vx, baseline_for(FONT_TEXT, fs, cy), vw + 1, r->v, -1, r->item ? t->dim : t->text, false);
+        u32 vc = r->state == HS_BAD ? t->danger : r->state == HS_WARN ? t->warn : r->state == HS_GOOD ? t->good : r->item ? t->dim : t->text;
+        text_draw_fit(FONT_TEXT, fs, vx, baseline_for(FONT_TEXT, fs, cy), vw + 1, r->v, -1, vc, false);
         if (i + 1 < cd->nrows) r_rect(b->x + pad, floorf(cy + S(HW_ROW_H) * 0.5f), w, 1, color_alpha(t->sep, 0.5f), 0);
     }
 }

@@ -10,10 +10,14 @@
 
 #define HW_ROWS 14
 
+// How a health reading looks: none (plain), fine, worth a look, a problem.
+enum { HS_NONE, HS_GOOD, HS_WARN, HS_BAD };
+
 typedef struct HwRow {
     WCHAR k[96];
     WCHAR v[160];
     bool item;              // a list entry (a module, a drive): the name is the bright part
+    u8 state;               // HS_*: colors the value
 } HwRow;
 
 typedef struct HwCard {
@@ -23,6 +27,8 @@ typedef struct HwCard {
     WCHAR sub[160];
     HwRow rows[HW_ROWS];
     int nrows;
+    u8 state;               // HS_*: the badge's color
+    WCHAR badge[48];        // a status pill at the top right, on the health page
 } HwCard;
 
 enum { HWC_CPU, HWC_GPU, HWC_RAM, HWC_BOARD, HWC_DISK, HWC_DISPLAY, HWC_NET, HWC_OS, HWC__COUNT };
@@ -55,6 +61,7 @@ static void row_add(HwCard *c, bool item, const WCHAR *k, const WCHAR *fmt, ...)
 #endif
     va_end(ap);
     r->item = item;
+    r->state = HS_NONE;
     if (r->k[0] || r->v[0]) c->nrows++;
 }
 
@@ -520,14 +527,10 @@ static void hw_board(void)
     }
 }
 
-static void hw_disks(void)
+// Which drive letters live on which physical disk: letters[disk] = "C:, D:".
+static void disk_letters(WCHAR letters[32][24])
 {
-    HwCard *c = &HW.card[HWC_DISK];
-    c->glyph = 0xEDA2;
-    wcopy(c->cat, countof(c->cat), TR("Накопители", "Storage"));
-    // which letters live on which disk
-    WCHAR letters[32][24];
-    memset(letters, 0, sizeof letters);
+    memset(letters, 0, sizeof(WCHAR) * 32 * 24);
     DWORD drives = GetLogicalDrives();
     for (int l = 2; l < 26; l++) {
         if (!(drives & (1u << l))) continue;
@@ -549,6 +552,15 @@ static void hw_disks(void)
         }
         CloseHandle(h);
     }
+}
+
+static void hw_disks(void)
+{
+    HwCard *c = &HW.card[HWC_DISK];
+    c->glyph = 0xEDA2;
+    wcopy(c->cat, countof(c->cat), TR("Накопители", "Storage"));
+    WCHAR letters[32][24];
+    disk_letters(letters);
     u64 total = 0;
     int count = 0;
     for (int i = 0; i < 32; i++) {

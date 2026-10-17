@@ -71,7 +71,7 @@ if "%MODE%"=="debug" set CFLAGS=-std=c11 -O0 -g
 if defined RCDEF set CFLAGS=%CFLAGS% -D%RCDEF%
 %CC% %CFLAGS% -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-missing-field-initializers -Wno-cast-function-type -mwindows ^
     src\main.c build\%OUT%.res.o -o build\%OUT%.exe -static ^
-    -ld3d11 -ldxgi -ldwmapi -lole32 -luuid -lshell32 -luser32 -lgdi32 -ladvapi32 -lsetupapi -lcfgmgr32 -liphlpapi -lws2_32 || exit /b 1
+    -ld3d11 -ldxgi -ldwmapi -lole32 -luuid -lshell32 -luser32 -lgdi32 -ladvapi32 -lsetupapi -lcfgmgr32 -liphlpapi -lws2_32 -lwevtapi || exit /b 1
 
 :done
 for %%f in (build\%OUT%.exe) do echo build\%OUT%.exe  %%~zf bytes

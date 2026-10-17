@@ -6,12 +6,12 @@
 #define HW_HEAD_H 86.f
 #define HW_SCORE_H 244.f
 
-// Red through amber to the accent green, along the gauge (0..1).
+// Light green into the app's accent, along the gauge (0..1).
 static u32 score_color(f32 p)
 {
     const Theme *t = &A.th;
-    u32 red = t->dark ? RGBA(255, 107, 107, 255) : RGBA(214, 60, 46, 255), amber = t->dark ? RGBA(252, 191, 52, 255) : RGBA(214, 140, 0, 255);
-    return p < 0.5f ? color_mix(red, amber, p / 0.5f) : color_mix(amber, t->accent, (p - 0.5f) / 0.5f);
+    u32 light = t->dark ? RGBA(196, 242, 178, 255) : RGBA(146, 214, 150, 255);
+    return color_mix(light, t->accent, CLAMP(p, 0.f, 1.f));
 }
 
 static void draw_icon_tile(f32 x, f32 y, f32 sz, u32 glyph)
@@ -31,7 +31,7 @@ static void draw_hw_score(const Box *b)
     f32 k = ease_out_cubic(A.score_t), v = (f32)HW.d.score_total * k;
 
     // A 270-degree ring open at the bottom, drawn as short overlapping segments of solid color so the joins don't
-    // show; the filled part runs red to green along the ring, with round caps and a soft glow at its end.
+    // show; the filled part runs light green into the accent along the ring, with round caps.
     f32 r = S(80), th_w = S(14), cx = b->x + S(40) + r, cy = b->y + b->h * 0.5f + S(10);
     u32 track = t->dark ? RGBA(58, 59, 63, 255) : RGBA(225, 226, 230, 255);
     const int n = 180;
@@ -48,12 +48,11 @@ static void draw_hw_score(const Box *b)
         int m = (int)ceilf((f32)n * pv);
         for (int i = 0; i < m; i++) {
             f32 p = MIN(((f32)i + 0.5f) / (f32)n, pv), a = (225.f - 270.f * p) * 0.01745329f;
-            r_rect_rot(cx + cosf(a) * r, cy - sinf(a) * r, th_w, seg, -a, 1.f, score_color(p), 0);
+            r_rect_rot(cx + cosf(a) * r, cy - sinf(a) * r, th_w, seg, -a, 1.f, score_color(p / pv), 0);
         }
         r_rect(cx + cosf(a0) * r - th_w * 0.5f, cy - sinf(a0) * r - th_w * 0.5f, th_w, th_w, score_color(0), th_w * 0.5f);
         f32 ae = (225.f - 270.f * pv) * 0.01745329f, ex = cx + cosf(ae) * r, ey = cy - sinf(ae) * r;
-        r_rect_ex(ex - th_w, ey - th_w, th_w * 2, th_w * 2, color_alpha(score_color(pv), 0.45f), th_w, 0, S(8));
-        r_rect(ex - th_w * 0.5f, ey - th_w * 0.5f, th_w, th_w, score_color(pv), th_w * 0.5f);
+        r_rect(ex - th_w * 0.5f, ey - th_w * 0.5f, th_w, th_w, score_color(1.f), th_w * 0.5f);
         r_rect(ex - S(3), ey - S(3), S(6), S(6), RGBA(255, 255, 255, 230), S(3));
     }
     WCHAR num[8];
@@ -62,7 +61,7 @@ static void draw_hw_score(const Box *b)
     text_center(FONT_TEXT, SC(12), cx, cy + S(22), TR("из 100", "of 100"), t->dim);
     // the tier on a pill in the ring's opening
     const WCHAR *tier = score_tier(HW.d.score_total);
-    u32 tc = score_color((f32)HW.d.score_total / 100.f);
+    u32 tc = t->accent;
     f32 tfs = SC(12.5f), tw = text_width(FONT_TEXT_SEMIBOLD, tfs, tier, -1) + S(22), tph = S(24), ty = cy + r * 0.72f - tph * 0.5f + S(4);
     r_rect(floorf(cx - tw * 0.5f), ty, tw, tph, color_alpha(tc, 0.18f), tph * 0.5f);
     text_center(FONT_TEXT_SEMIBOLD, tfs, cx, ty + tph * 0.5f, tier, tc);
@@ -92,7 +91,7 @@ static void draw_hw_score(const Box *b)
         text_right(FONT_TEXT_SEMIBOLD, SC(17), tr, tb.y + S(20), num, t->text);
         f32 bw = tr - tx, by = tb.y + S(39);
         r_rect(tx, by, bw, S(5), track, S(2.5f));
-        if (pv2 > 0.5f) r_rect(tx, by, MAX(S(5), floorf(bw * pv2 / 100.f)), S(5), score_color(pv2 / 100.f), S(2.5f));
+        if (pv2 > 0.5f) r_rect(tx, by, MAX(S(5), floorf(bw * pv2 / 100.f)), S(5), t->accent, S(2.5f));
     }
 }
 

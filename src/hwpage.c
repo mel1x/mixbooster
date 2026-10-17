@@ -70,7 +70,7 @@ static void draw_hw_score(const Box *b)
     f32 x = cx + r + S(52), x1 = b->x + b->w - S(24), y = b->y + S(24);
     text_draw(FONT_TEXT_SEMIBOLD, SC(17), x, baseline_for(FONT_TEXT_SEMIBOLD, SC(17), y + S(4)), TR("Оценка ПК", "PC score"), -1, t->text);
     text_draw_fit(FONT_TEXT, SC(12.5f), x, baseline_for(FONT_TEXT, SC(12.5f), y + S(30)), x1 - x,
-                  TR("Сравнение с топовым игровым ПК сегодня, это 100", "Compared with a top gaming PC of today, which is 100"), -1, t->dim, false);
+                  TR("Оценка комплектующих ПК по игровой мощности", "The PC parts rated by gaming power"), -1, t->dim, false);
     static const struct { u32 glyph; const WCHAR *ru, *en; } parts[SC__COUNT] = {
         { 0xF211, L"Видеокарта", L"Graphics" }, { 0xEEA1, L"Процессор", L"Processor" },
         { 0xE964, L"Память", L"Memory" },       { 0xEDA2, L"Системный диск", L"System drive" },

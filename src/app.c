@@ -117,16 +117,9 @@ static void theme_update(void)
     bool dark = !(reg_dword_hkcu(L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", L"AppsUseLightTheme", &light) && light);
     Theme *t = &A.th;
     t->dark = dark;
-    u32 acc = RGBA(0, 120, 212, 255);
-    BYTE pal[32];
-    DWORD sz = sizeof pal, c;
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent", L"AccentPalette", RRF_RT_REG_BINARY,
-                     NULL, pal, &sz) == ERROR_SUCCESS && sz >= 32) {
-        int i = dark ? 1 : 4;
-        acc = RGBA(pal[i * 4], pal[i * 4 + 1], pal[i * 4 + 2], 255);
-    } else if (reg_dword_hkcu(L"Software\\Microsoft\\Windows\\DWM", L"AccentColor", &c)) {
-        acc = RGBA(c & 255, (c >> 8) & 255, (c >> 16) & 255, 255);
-    }
+    // MixBooster's own accent, the green of the logo, not the system one: lighter on dark, deeper on light, the way
+    // Windows shifts its accent between the themes.
+    u32 acc = dark ? RGBA(0x6C, 0xCB, 0x7E, 255) : RGBA(0x2E, 0x8B, 0x4A, 255);
     t->accent = acc;
     f32 lum = (0.299f * (f32)(acc & 255) + 0.587f * (f32)((acc >> 8) & 255) + 0.114f * (f32)((acc >> 16) & 255)) / 255.f;
     t->on_accent = lum > 0.6f ? RGBA(0, 0, 0, 230) : RGBA(255, 255, 255, 255);
@@ -481,7 +474,7 @@ static void draw_controls(void)
         f32 my = A.bind.y + A.bind.h * 0.5f;
         text_draw(FONT_TEXT, SC(12.5f), rx, baseline_for(FONT_TEXT, SC(12.5f), my - S(9)), tail, -1, t->text);
         text_draw_fit(FONT_TEXT, SC(12), rx, baseline_for(FONT_TEXT, SC(12), my + S(10)), rr - rx,
-                      TR("Экран будет мигать — не трогайте ПК. F4 остановит тест", "The screen will flicker — leave the PC alone. F4 stops the test"),
+                      TR("Экран будет мигать - не трогайте ПК. F4 остановит тест", "The screen will flicker - leave the PC alone. F4 stops the test"),
                       -1, t->faint, false);
         return;
     }
@@ -716,7 +709,7 @@ static void draw_table(void)
             f32 rx = b->x + pad + cpu_w + colw * (f32)(k + 1);
             WCHAR v[32];
             if (!rows[i].ok) {
-                text_right(FONT_TEXT, fs, rx, cy, cur ? L"…" : L"—", t->faint);
+                text_right(FONT_TEXT, fs, rx, cy, cur ? L"…" : L"-", t->faint);
                 continue;
             }
             fmt_metric(v, countof(v), m, rows[i].v[m]);
@@ -770,14 +763,14 @@ static int modal_items(ModalItem *it, WCHAR *eta, int cap)
     WCHAR d[48];
     fmt_duration(d, countof(d), step * A.cpu.count * A.runs);
     wfmt(eta, cap,
-         TR("Тест займёт %s. Экран будет гаснуть и уходить в полноэкранный режим — это перезапуск драйвера видеокарты на каждом ядре.",
+         TR("Тест займёт %s. Экран будет гаснуть и уходить в полноэкранный режим - это перезапуск драйвера видеокарты на каждом ядре.",
             "The test takes %s. The screen goes black and fullscreen now and then: the GPU driver restarts for every core."),
          d);
     it[0] = (ModalItem){ 0xE7BA, TR("Не трогайте ПК во время теста", "Leave the PC alone during the test"), eta };
     it[1] = (ModalItem){ 0xE9D9, TR("Закройте всё, что нагружает ПК", "Close everything that loads the PC"),
-                         TR("Игры, браузер, лаунчеры, оверлеи, запись экрана, торренты — любая фоновая нагрузка на процессор или видеокарту исказит результаты.",
+                         TR("Игры, браузер, лаунчеры, оверлеи, запись экрана, торренты - любая фоновая нагрузка на процессор или видеокарту исказит результаты.",
                             "Games, the browser, launchers, overlays, screen recording, torrents: any background load on the CPU or GPU skews the results.") };
-    it[2] = (ModalItem){ 0, TR("Нужен ПК — нажмите F4", "Need the PC? Press F4"),
+    it[2] = (ModalItem){ 0, TR("Нужен ПК - нажмите F4", "Need the PC? Press F4"),
                          TR("Тест остановится в любой момент, даже поверх полноэкранного окна, а видеокарта вернётся к прежней привязке.",
                             "The test stops at any moment, even over the fullscreen window, and the GPU goes back to its previous binding.") };
     return 3;

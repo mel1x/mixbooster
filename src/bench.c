@@ -325,7 +325,7 @@ static bool measure_cpu(int run, int cpu)
     if (gpus_apply(1ull << cpu, false, true) <= 0) {
         // Without a restart the GPU stays where it was and every core would measure the same.
         wcopy(B.error, countof(B.error),
-              TR("Драйвер видеокарты не перезапускается без перезагрузки — тест невозможен", "The GPU driver can't restart without a reboot, so the test can't run"));
+              TR("Драйвер видеокарты не перезапускается без перезагрузки - тест невозможен", "The GPU driver can't restart without a reboot, so the test can't run"));
         B.cancel = 1;
         return false;
     }

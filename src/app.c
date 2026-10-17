@@ -262,12 +262,12 @@ static void draw_button(const Box *b, const WCHAR *label, u32 glyph, int style, 
 }
 
 // The logo, as in tools/make-icon.py: a chip with one core lit, on a dark tile like MixLauncher's and MixWidgets'.
-// Art units 0..100 cover the inner 68% of the tile.
+// Art units 0..100 cover the inner 72% of the tile. The exe and the taskbar use the same chip without the tile.
 static void draw_logo(f32 x, f32 y, f32 sz)
 {
     x = floorf(x);
     y = floorf(y);
-    f32 rad = floorf(sz * 0.225f + 0.5f), u = sz * 0.68f / 100.f, ox = x + sz * 0.16f, oy = y + sz * 0.16f;
+    f32 rad = floorf(sz * 0.225f + 0.5f), u = sz * 0.72f / 100.f, ox = x + sz * 0.14f, oy = y + sz * 0.14f;
     r_rect(x, y, sz, sz, RGBA(0x1C, 0x23, 0x1E, 255), rad);
     r_rect_ex(x, y, sz, sz, RGBA(255, 255, 255, 26), rad, 1.f, 0);
     u32 pin = RGBA(0x2C, 0x5E, 0x3A, 255);

@@ -1,4 +1,7 @@
-# Draws res/mixbooster.ico and res/logo.png: the "chip with one core lit" logo on a MixLauncher-style dark tile.
+# Draws the "chip with one core lit" logo, like MixLauncher and MixWidgets do theirs:
+#   res/logo.png       on the dark tile: the sidebar (draw_logo in src/app.c) and the README
+#   res/mixbooster.ico without the tile: the exe, the window on the taskbar, a tray icon
+#   res/logo-bare.png  the same, for previews
 # The same geometry is drawn in the app by draw_logo (src/app.c); keep them in step.
 # python tools/make-icon.py  (needs Pillow)
 import os
@@ -22,26 +25,23 @@ def rgb(v):
     return ((v >> 16) & 255, (v >> 8) & 255, v & 255, 255)
 
 
-def U(v):
-    # art units 0..100 over the inner 68% of the tile
-    inner = N * 0.68
-    return (N - inner) / 2 + v / 100 * inner
+TILE_ART = 0.72   # the chip's share of the tile
+BARE_ART = 0.98   # the chip's share of the icon without the tile
 
 
-def k(v):
-    return v / 100 * N * 0.68
+def draw(tile):
+    """The logo: on the dark tile (the sidebar, the README) or bare (the exe, the taskbar, a tray)."""
+    art = TILE_ART if tile else BARE_ART
+    U = lambda v: (N - N * art) / 2 + v / 100 * N * art
+    k = lambda v: v / 100 * N * art
+    R = lambda x0, y0, x1, y1: [U(x0), U(y0), U(x1), U(y1)]
 
-
-def R(x0, y0, x1, y1):
-    return [U(x0), U(y0), U(x1), U(y1)]
-
-
-def main():
     img = Image.new("RGBA", (N, N), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    r = int(N * 0.225)
-    d.rounded_rectangle([0, 0, N - 1, N - 1], radius=r, fill=TILE)
-    d.rounded_rectangle([0, 0, N - 1, N - 1], radius=r, outline=(255, 255, 255, 26), width=SS * 2)
+    if tile:
+        r = int(N * 0.225)
+        d.rounded_rectangle([0, 0, N - 1, N - 1], radius=r, fill=TILE)
+        d.rounded_rectangle([0, 0, N - 1, N - 1], radius=r, outline=(255, 255, 255, 26), width=SS * 2)
 
     for o in (32, 50, 68):
         for box in ((o - 4, 2, o + 4, 14), (o - 4, 86, o + 4, 98), (2, o - 4, 14, o + 4), (86, o - 4, 98, o + 4)):
@@ -52,10 +52,14 @@ def main():
     for i, (x, y) in enumerate([(26, 26), (52, 26), (26, 52), (52, 52)]):
         sx, sy = 50 + (x - 50) * CORE_SCALE, 50 + (y - 50) * CORE_SCALE
         d.rounded_rectangle(R(sx, sy, sx + 22 * CORE_SCALE, sy + 22 * CORE_SCALE), radius=k(6 * CORE_SCALE), fill=rgb(LIT if i == 1 else CORE))
+    return img.resize((256, 256), Image.LANCZOS)
 
-    out = img.resize((256, 256), Image.LANCZOS)
-    out.save(os.path.join(RES, "logo.png"))
-    out.save(os.path.join(RES, "mixbooster.ico"), sizes=[(16, 16), (20, 20), (24, 24), (32, 32), (40, 40), (48, 48), (64, 64), (128, 128), (256, 256)])
+
+def main():
+    draw(True).save(os.path.join(RES, "logo.png"))
+    bare = draw(False)
+    bare.save(os.path.join(RES, "logo-bare.png"))
+    bare.save(os.path.join(RES, "mixbooster.ico"), sizes=[(16, 16), (20, 20), (24, 24), (32, 32), (40, 40), (48, 48), (64, 64), (128, 128), (256, 256)])
     print("ok")
 
 

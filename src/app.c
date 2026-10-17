@@ -262,13 +262,13 @@ static void draw_button(const Box *b, const WCHAR *label, u32 glyph, int style, 
 }
 
 // The logo, as in tools/make-icon.py: a chip with one core lit, on a dark tile like MixLauncher's and MixWidgets'.
-// Art units 0..100 cover the inner 62% of the tile.
+// Art units 0..100 cover the inner 68% of the tile.
 static void draw_logo(f32 x, f32 y, f32 sz)
 {
     x = floorf(x);
     y = floorf(y);
-    f32 rad = floorf(sz * 0.225f + 0.5f), u = sz * 0.62f / 100.f, ox = x + sz * 0.19f, oy = y + sz * 0.19f;
-    r_rect(x, y, sz, sz, RGBA(0x1E, 0x21, 0x28, 255), rad);
+    f32 rad = floorf(sz * 0.225f + 0.5f), u = sz * 0.68f / 100.f, ox = x + sz * 0.16f, oy = y + sz * 0.16f;
+    r_rect(x, y, sz, sz, RGBA(0x1C, 0x23, 0x1E, 255), rad);
     r_rect_ex(x, y, sz, sz, RGBA(255, 255, 255, 26), rad, 1.f, 0);
     u32 pin = RGBA(0x2C, 0x5E, 0x3A, 255);
     for (int i = 0; i < 3; i++) {
@@ -281,7 +281,7 @@ static void draw_logo(f32 x, f32 y, f32 sz)
     r_rect(ox + 14 * u, oy + 14 * u, 72 * u, 72 * u, pin, 14 * u);
     static const f32 cells[4][2] = { { 26, 26 }, { 52, 26 }, { 26, 52 }, { 52, 52 } };
     // The four cores as one group, scaled up from the chip's center.
-    const f32 cs = 1.12f;
+    const f32 cs = 1.06f;
     for (int i = 0; i < 4; i++)
         r_rect(ox + (50 + (cells[i][0] - 50) * cs) * u, oy + (50 + (cells[i][1] - 50) * cs) * u, 22 * cs * u, 22 * cs * u,
                i == 1 ? RGBA(0xA6, 0xF0, 0x8E, 255) : RGBA(0x46, 0x9C, 0x5C, 255), 6 * cs * u);

@@ -10,10 +10,10 @@ RES = os.path.join(HERE, "..", "res")
 SS = 4
 N = 256 * SS
 
-TILE = (0x1E, 0x21, 0x28, 255)
+TILE = (0x1C, 0x23, 0x1E, 255)   # dark, tinted toward the logo's green like MixLauncher's and MixWidgets' tiles
 PIN = 0x2C5E3A
 BODY = 0x2C5E3A
-CORE_SCALE = 1.12   # the four cores as one group, scaled from the chip's center
+CORE_SCALE = 1.06   # the four cores as one group, scaled from the chip's center
 CORE = 0x469C5C
 LIT = 0xA6F08E
 
@@ -23,13 +23,13 @@ def rgb(v):
 
 
 def U(v):
-    # art units 0..100 over the inner 62% of the tile, like MixWidgets' app tile
-    inner = N * 0.62
+    # art units 0..100 over the inner 68% of the tile
+    inner = N * 0.68
     return (N - inner) / 2 + v / 100 * inner
 
 
 def k(v):
-    return v / 100 * N * 0.62
+    return v / 100 * N * 0.68
 
 
 def R(x0, y0, x1, y1):

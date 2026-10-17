@@ -4,9 +4,7 @@
 #define HW_TOP 88.f        // the page content starts under the title, in DIPs
 #define HW_ROW_H 34.f
 #define HW_HEAD_H 86.f
-
-
-#define HW_SCORE_H 214.f
+#define HW_SCORE_H 244.f
 
 // Red through amber to the accent green, along the gauge (0..1).
 static u32 score_color(f32 p)
@@ -16,7 +14,14 @@ static u32 score_color(f32 p)
     return p < 0.5f ? color_mix(red, amber, p / 0.5f) : color_mix(amber, t->accent, (p - 0.5f) / 0.5f);
 }
 
-// The score: a speedometer on the left, what it is made of on the right.
+static void draw_icon_tile(f32 x, f32 y, f32 sz, u32 glyph)
+{
+    const Theme *t = &A.th;
+    r_rect(x, y, sz, sz, color_alpha(t->accent, t->dark ? 0.16f : 0.14f), floorf(sz * 0.28f));
+    text_draw_icon(glyph, sz * 0.46f, x + sz * 0.5f, y + sz * 0.5f, t->accent);
+}
+
+// The score: a ring gauge on the left, the four parts it is made of on the right.
 static void draw_hw_score(const Box *b)
 {
     const Theme *t = &A.th;
@@ -25,47 +30,69 @@ static void draw_hw_score(const Box *b)
     r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
     f32 k = ease_out_cubic(A.score_t), v = (f32)SCORE.total * k;
 
-    // 270 degrees of ticks, open at the bottom; the ticks up to the score light up
-    f32 r = S(84), cx = b->x + S(30) + r, cy = b->y + b->h * 0.5f + S(12);
-    const int n = 40;
+    // A 270-degree ring open at the bottom, drawn as short overlapping segments of solid color so the joins don't
+    // show; the filled part runs red to green along the ring, with round caps and a soft glow at its end.
+    f32 r = S(80), th_w = S(14), cx = b->x + S(40) + r, cy = b->y + b->h * 0.5f + S(10);
+    u32 track = t->dark ? RGBA(58, 59, 63, 255) : RGBA(225, 226, 230, 255);
+    const int n = 180;
+    f32 seg = r * 4.712389f / (f32)n * 1.7f;
     for (int i = 0; i < n; i++) {
-        f32 p = ((f32)i + 0.5f) / (f32)n, th = (225.f - 270.f * p) * 0.01745329f;
-        f32 len = S(14), mid = r - len * 0.5f;
-        bool on = p * 100.f <= v;
-        r_rect_rot(cx + cosf(th) * mid, cy - sinf(th) * mid, len, S(5), -th, 1.f, on ? score_color(p) : c->ctl, S(2.5f));
+        f32 p = ((f32)i + 0.5f) / (f32)n, a = (225.f - 270.f * p) * 0.01745329f;
+        r_rect_rot(cx + cosf(a) * r, cy - sinf(a) * r, th_w, seg, -a, 1.f, track, 0);
     }
-    text_center(FONT_TEXT, SC(11), cx + cosf(225.f * 0.01745329f) * (r - S(4)) + S(4), cy + r * 0.7f + S(10), L"0", t->faint);
-    text_center(FONT_TEXT, SC(11), cx + cosf(-45.f * 0.01745329f) * (r - S(4)) - S(4), cy + r * 0.7f + S(10), L"100", t->faint);
-    // the needle and its hub
-    f32 th = (225.f - 270.f * v / 100.f) * 0.01745329f, nl = r - S(30);
-    r_rect_rot(cx + cosf(th) * nl * 0.5f, cy - sinf(th) * nl * 0.5f, nl, S(4), -th, 1.f, t->text, S(2));
-    r_rect(cx - S(8), cy - S(8), S(16), S(16), t->text, S(8));
-    r_rect(cx - S(3), cy - S(3), S(6), S(6), c->card, S(3));
+    f32 a0 = 225.f * 0.01745329f, a1 = -45.f * 0.01745329f;
+    r_rect(cx + cosf(a0) * r - th_w * 0.5f, cy - sinf(a0) * r - th_w * 0.5f, th_w, th_w, track, th_w * 0.5f);
+    r_rect(cx + cosf(a1) * r - th_w * 0.5f, cy - sinf(a1) * r - th_w * 0.5f, th_w, th_w, track, th_w * 0.5f);
+    f32 pv = v / 100.f;
+    if (pv > 0.f) {
+        int m = (int)ceilf((f32)n * pv);
+        for (int i = 0; i < m; i++) {
+            f32 p = MIN(((f32)i + 0.5f) / (f32)n, pv), a = (225.f - 270.f * p) * 0.01745329f;
+            r_rect_rot(cx + cosf(a) * r, cy - sinf(a) * r, th_w, seg, -a, 1.f, score_color(p), 0);
+        }
+        r_rect(cx + cosf(a0) * r - th_w * 0.5f, cy - sinf(a0) * r - th_w * 0.5f, th_w, th_w, score_color(0), th_w * 0.5f);
+        f32 ae = (225.f - 270.f * pv) * 0.01745329f, ex = cx + cosf(ae) * r, ey = cy - sinf(ae) * r;
+        r_rect_ex(ex - th_w, ey - th_w, th_w * 2, th_w * 2, color_alpha(score_color(pv), 0.45f), th_w, 0, S(8));
+        r_rect(ex - th_w * 0.5f, ey - th_w * 0.5f, th_w, th_w, score_color(pv), th_w * 0.5f);
+        r_rect(ex - S(3), ey - S(3), S(6), S(6), RGBA(255, 255, 255, 230), S(3));
+    }
     WCHAR num[8];
     wfmt(num, countof(num), L"%d", (int)(v + 0.5f));
-    text_center(FONT_DISPLAY, SC(34), cx, cy + S(40), num, t->text);
-    text_center(FONT_TEXT, SC(11.5f), cx, cy + S(62), TR("из 100", "of 100"), t->dim);
+    text_center(FONT_DISPLAY, SC(48), cx, cy - S(8), num, t->text);
+    text_center(FONT_TEXT, SC(12), cx, cy + S(22), TR("из 100", "of 100"), t->dim);
+    // the tier on a pill in the ring's opening
+    const WCHAR *tier = score_tier(SCORE.total);
+    u32 tc = score_color((f32)SCORE.total / 100.f);
+    f32 tfs = SC(12.5f), tw = text_width(FONT_TEXT_SEMIBOLD, tfs, tier, -1) + S(22), tph = S(24), ty = cy + r * 0.72f - tph * 0.5f + S(4);
+    r_rect(floorf(cx - tw * 0.5f), ty, tw, tph, color_alpha(tc, 0.18f), tph * 0.5f);
+    text_center(FONT_TEXT_SEMIBOLD, tfs, cx, ty + tph * 0.5f, tier, tc);
 
-    // right: the tier, a line on what it means, and the four parts
-    f32 x = cx + r + S(40), x1 = b->x + b->w - S(28), y = b->y + S(26);
-    text_draw(FONT_TEXT, SC(12), x, baseline_for(FONT_TEXT, SC(12), y), TR("Оценка ПК", "PC score"), -1, t->dim);
-    text_draw(FONT_TEXT_SEMIBOLD, SC(22), x, baseline_for(FONT_TEXT_SEMIBOLD, SC(22), y + S(28)), score_tier(SCORE.total), -1,
-              score_color((f32)SCORE.total / 100.f));
-    text_draw_fit(FONT_TEXT, SC(12.5f), x, baseline_for(FONT_TEXT, SC(12.5f), y + S(54)), x1 - x,
-                  TR("100 - топовый игровой ПК сегодня. Оценка примерная: по моделям и характеристикам, без тестов.",
-                     "100 is a top gaming PC of today. A rough estimate from the models and specs, not a benchmark."),
-                  -1, t->dim, false);
-    static const struct { const WCHAR *ru, *en; } names[SC__COUNT] = {
-        { L"Видеокарта", L"Graphics" }, { L"Процессор", L"Processor" }, { L"Память", L"Memory" }, { L"Системный диск", L"System drive" },
+    // right: what the score means, then a tile per part
+    f32 x = cx + r + S(52), x1 = b->x + b->w - S(24), y = b->y + S(24);
+    text_draw(FONT_TEXT_SEMIBOLD, SC(17), x, baseline_for(FONT_TEXT_SEMIBOLD, SC(17), y + S(4)), TR("Оценка ПК", "PC score"), -1, t->text);
+    text_wrap(FONT_TEXT, SC(12.5f), x, baseline_for(FONT_TEXT, SC(12.5f), y + S(30)), x1 - x, S(18),
+              TR("Насколько ПК мощный для игр: 100 - топовый игровой ПК сегодня. Оценка примерная, по моделям и характеристикам, без тестов.",
+                 "How strong the PC is for games: 100 is a top gaming PC of today. A rough estimate from the models and specs, not a benchmark."),
+              t->dim, true);
+    static const struct { u32 glyph; const WCHAR *ru, *en; } parts[SC__COUNT] = {
+        { 0xF211, L"Видеокарта", L"Graphics" }, { 0xEEA1, L"Процессор", L"Processor" },
+        { 0xE964, L"Память", L"Memory" },       { 0xEDA2, L"Системный диск", L"System drive" },
     };
-    f32 ry = y + S(82), lw = S(130), bx = x + lw, bw = x1 - bx - S(44);
+    f32 gap = S(10), cw = floorf((x1 - x - gap) * 0.5f), ch = S(58), gy = b->y + b->h - S(20) - ch * 2 - gap;
     for (int i = 0; i < SC__COUNT; i++) {
-        f32 cyr = ry + S(26) * (f32)i, pv = (f32)SCORE.part[i] * k;
-        text_draw(FONT_TEXT, SC(13), x, baseline_for(FONT_TEXT, SC(13), cyr), g_lang_ru ? names[i].ru : names[i].en, -1, t->text);
-        r_rect(bx, cyr - S(3), bw, S(6), c->ctl, S(3));
-        if (pv > 0.5f) r_rect(bx, cyr - S(3), MAX(S(6), floorf(bw * pv / 100.f)), S(6), score_color(pv / 100.f), S(3));
-        wfmt(num, countof(num), L"%d", (int)(pv + 0.5f));
-        text_right(FONT_TEXT_SEMIBOLD, SC(13), x1, cyr, num, t->text);
+        Box tb = { x + (cw + gap) * (f32)(i % 2), gy + (ch + gap) * (f32)(i / 2), cw, ch };
+        r_rect(tb.x, tb.y, tb.w, tb.h, c->ctl, S(8));
+        f32 isz = S(34);
+        draw_icon_tile(tb.x + S(12), tb.y + (tb.h - isz) * 0.5f, isz, parts[i].glyph);
+        f32 tx = tb.x + S(12) + isz + S(12), tr = tb.x + tb.w - S(14), pv2 = (f32)SCORE.part[i] * k;
+        wfmt(num, countof(num), L"%d", (int)(pv2 + 0.5f));
+        f32 nw = text_width(FONT_TEXT_SEMIBOLD, SC(17), num, -1);
+        text_draw_fit(FONT_TEXT, SC(12.5f), tx, baseline_for(FONT_TEXT, SC(12.5f), tb.y + S(21)), tr - tx - nw - S(8), g_lang_ru ? parts[i].ru : parts[i].en,
+                      -1, t->dim, false);
+        text_right(FONT_TEXT_SEMIBOLD, SC(17), tr, tb.y + S(20), num, t->text);
+        f32 bw = tr - tx, by = tb.y + S(39);
+        r_rect(tx, by, bw, S(5), track, S(2.5f));
+        if (pv2 > 0.5f) r_rect(tx, by, MAX(S(5), floorf(bw * pv2 / 100.f)), S(5), score_color(pv2 / 100.f), S(2.5f));
     }
 }
 
@@ -92,13 +119,6 @@ static f32 hw_layout(Box *score, Box *stats, Box *cards)
 
 static f32 hw_view_h(void) { return (f32)A.H - S(HW_TOP) - S(8); }
 static f32 hw_max_scroll(void) { return MAX(0.f, A.hw_content_h - hw_view_h()); }
-
-static void draw_icon_tile(f32 x, f32 y, f32 sz, u32 glyph)
-{
-    const Theme *t = &A.th;
-    r_rect(x, y, sz, sz, color_alpha(t->accent, t->dark ? 0.16f : 0.14f), floorf(sz * 0.28f));
-    text_draw_icon(glyph, sz * 0.46f, x + sz * 0.5f, y + sz * 0.5f, t->accent);
-}
 
 static void draw_hw_stat(const Box *b, const HwStat *s)
 {

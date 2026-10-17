@@ -61,6 +61,39 @@ static void fmt_hours(WCHAR *out, int cap, u64 h)
 
 // --- drives --------------------------------------------------------------------------------------------------------
 
+#define DISK_EVENTS L"Provider[@Name='disk'] and (EventID=7 or EventID=11 or EventID=51 or EventID=153)"
+
+// Disk errors in the System log over 30 days, per physical disk: the events name "\Device\Harddisk0\DR0".
+static int disk_event_counts(int counts[32])
+{
+    memset(counts, 0, sizeof(int) * 32);
+    WCHAR q[512];
+    wfmt(q, countof(q), L"*[System[%s and TimeCreated[timediff(@SystemTime) <= 2592000000]]]", DISK_EVENTS);
+    EVT_HANDLE h = EvtQuery(NULL, L"System", q, EvtQueryChannelPath | EvtQueryReverseDirection);
+    if (!h) return 0;
+    int total = 0;
+    EVT_HANDLE ev[64];
+    DWORD got = 0;
+    static WCHAR xml[16384];
+    while (total < 9999 && EvtNext(h, countof(ev), ev, 0, 0, &got)) {
+        for (DWORD i = 0; i < got; i++) {
+            DWORD used = 0, cnt = 0;
+            if (EvtRender(NULL, ev[i], EvtRenderEventXml, sizeof xml - sizeof(WCHAR), xml, &used, &cnt)) {
+                xml[MIN(used / sizeof(WCHAR), countof(xml) - 1)] = 0;
+                const WCHAR *p = wcsstr(xml, L"Harddisk");
+                if (p) {
+                    long n = wcstol(p + 8, NULL, 10);
+                    if (n >= 0 && n < 32) counts[n]++;
+                }
+            }
+            EvtClose(ev[i]);
+            total++;
+        }
+    }
+    EvtClose(h);
+    return total;
+}
+
 // The NVMe SMART / Health Information log page (0x02), 512 bytes.
 static bool nvme_log(HANDLE h, u8 *log)
 {
@@ -225,6 +258,8 @@ static void hl_disks(void)
 {
     WCHAR letters[32][24];
     disk_letters(letters);
+    int errors[32];
+    disk_event_counts(errors);
     for (int i = 0; i < 32; i++) {
         WCHAR path[32];
         wfmt(path, countof(path), L"\\\\.\\PhysicalDrive%d", i);
@@ -276,6 +311,17 @@ static void hl_disks(void)
                        : TR("нужны права администратора", "needs administrator rights"));
         }
         CloseHandle(h);
+        // Windows logged read errors (bad blocks, retries) on this disk: worth a backup and a closer look
+        if (errors[i]) {
+            row_add(c, false, TR("Ошибки в журнале Windows", "Errors in the Windows log"), TR("%d за 30 дней", "%d in 30 days"), errors[i]);
+            row_state(c, HS_BAD);
+            if (c->state < HS_WARN) {
+                WCHAR keep[48];
+                const WCHAR *dot = wcsstr(c->badge, L" · ");
+                wcopy(keep, countof(keep), dot ? dot + 3 : L"");
+                hl_badge(c, HS_WARN, keep);
+            }
+        }
         HL.disks++;
         if (c->state == HS_GOOD) HL.disks_ok++;
     }
@@ -409,11 +455,11 @@ static void hl_stability(void)
     HL.whea = ev_count(L"Provider[@Name='Microsoft-Windows-WHEA-Logger']", &lw);
     int whea_fatal = ev_count(L"Provider[@Name='Microsoft-Windows-WHEA-Logger'] and (Level=1 or Level=2)", &lwf);
     int shut = ev_count(L"Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=41", &ls);
-    int disk = ev_count(L"Provider[@Name='disk'] and (EventID=7 or EventID=11 or EventID=51 or EventID=153)", &ld);
+    int disk = ev_count(DISK_EVENTS, &ld);
     ev_row(c, TR("Синие экраны", "Blue screens"), HL.bsod, &lb, 3, HS_WARN);
     ev_row(c, TR("Аппаратные ошибки WHEA", "WHEA hardware errors"), HL.whea, &lw, 0, whea_fatal ? HS_BAD : HS_WARN);
     ev_row(c, TR("Внезапные выключения", "Unexpected power-offs"), shut, &ls, 5, HS_WARN);
-    ev_row(c, TR("Ошибки дисков", "Disk errors"), disk, &ld, 0, HS_BAD);
+    ev_row(c, TR("Ошибки дисков", "Disk errors"), disk, &ld, 0, HS_WARN);
     if (c->state == HS_GOOD) {
         wcopy(c->head, countof(c->head), TR("Сбоев не было", "No crashes"));
         wcopy(c->sub, countof(c->sub), TR("Система работает стабильно", "The system runs stable"));
@@ -421,8 +467,9 @@ static void hl_stability(void)
         int total = HL.bsod + HL.whea + shut + disk;
         wfmt(c->head, countof(c->head), TR("Событий: %d", "Events: %d"), total);
         wcopy(c->sub, countof(c->sub),
-              HL.whea ? TR("Ошибки WHEA - частый признак нестабильного разгона или сбоев памяти", "WHEA errors often mean an unstable overclock or memory faults")
-                      : TR("Подробности - в журнале событий Windows, раздел «Система»", "Details are in the Windows Event Viewer, System log"));
+              HL.whea ? TR("WHEA - часто нестабильный разгон или память", "WHEA: often an unstable overclock or memory")
+              : disk  ? TR("Какой диск - видно в его карточке", "The drive's card shows which one")
+                      : TR("Подробности - в журнале «Система»", "Details: Event Viewer, System log"));
     }
     hl_badge(c, c->state, NULL);
 }
@@ -494,16 +541,16 @@ static void hl_stats(void)
     HwStat *s = HL.stat;
     s[0].glyph = 0xEDA2;
     wfmt(s[0].value, countof(s[0].value), L"%d/%d", HL.disks_ok, HL.disks);
-    wcopy(s[0].label, countof(s[0].label), TR("дисков в порядке", "drives healthy"));
+    wcopy(s[0].label, countof(s[0].label), TR("дисков в норме", "drives healthy"));
     s[1].glyph = 0xEA39;
     wfmt(s[1].value, countof(s[1].value), L"%d", HL.bsod);
-    wcopy(s[1].label, countof(s[1].label), TR("синих экранов за 30 дней", "blue screens, 30 days"));
+    wcopy(s[1].label, countof(s[1].label), TR("синих экранов", "blue screens"));
     s[2].glyph = 0xE9D9;
     wfmt(s[2].value, countof(s[2].value), L"%d", HL.whea);
-    wcopy(s[2].label, countof(s[2].label), TR("аппаратных ошибок WHEA", "WHEA hardware errors"));
+    wcopy(s[2].label, countof(s[2].label), TR("ошибок WHEA", "WHEA errors"));
     s[3].glyph = 0xE772;
     wfmt(s[3].value, countof(s[3].value), L"%d", HL.devices);
-    wcopy(s[3].label, countof(s[3].label), TR("устройств с ошибками", "devices with problems"));
+    wcopy(s[3].label, countof(s[3].label), TR("сбоев устройств", "device problems"));
 }
 
 static DWORD WINAPI hl_thread(void *arg)
@@ -525,7 +572,7 @@ again:
     if (InterlockedExchange(&HL.again, 0)) goto again;
     InterlockedExchange(&HL.ready, 1);
     InterlockedExchange(&HL.busy, 0);
-    PostMessageW(notify, WM_APP_HW, 0, 0);
+    PostMessageW(notify, WM_APP_HEALTH, 0, 0);
     return 0;
 }
 

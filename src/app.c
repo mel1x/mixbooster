@@ -45,16 +45,18 @@ enum {
     HT_PKCANCEL,
     HT_PKPANEL,
     HT_PKOUT,
+    HT_HLREFRESH, // "Check again" on the health page
 };
 
 // Hover animation slots.
-enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_LANG, HV_MANUAL, HV_PKBEST, HV_PKCLEAR, HV_PKOK, HV_PKCANCEL, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
+enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_LANG, HV_MANUAL, HV_PKBEST, HV_PKCLEAR, HV_PKOK, HV_PKCANCEL, HV_HLREFRESH, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
 
 // The sidebar pages, top to bottom.
-enum { PG_HW, PG_AFF, PG__COUNT };
+enum { PG_HW, PG_HEALTH, PG_AFF, PG__COUNT };
 
 static const struct { u32 glyph; const WCHAR *ru, *en; } k_pages[PG__COUNT] = {
     { 0xEC4E, L"Комплектующие ПК", L"PC components" },
+    { 0xE95E, L"Здоровье ПК", L"PC health" },
     { 0xE950, L"GPU Affinity", L"GPU Affinity" },
 };
 
@@ -102,6 +104,8 @@ static struct {
     int page;                 // PG_*
     f32 nav_y, nav_v, nav_hov[PG__COUNT];
     f32 hw_scroll, hw_scroll_target, hw_scroll_v, hw_content_h, hw_sb_t;
+    f32 hl_scroll, hl_scroll_target, hl_scroll_v, hl_content_h, hl_sb_t;
+    Box hl_refresh;
     bool picker;              // the manual core picker
     f32 picker_t;
     u64 pk_mask;
@@ -1031,6 +1035,7 @@ static void picker_close(bool bind)
 
 #include "donate.c"
 #include "hwpage.c"
+#include "healthpage.c"
 
 static void draw_all(void)
 {
@@ -1051,6 +1056,11 @@ static void draw_all(void)
             text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100), sub, -1, t->dim, false);
         }
         draw_hw_page(rise);
+    } else if (A.page == PG_HEALTH) {
+        text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, TR("Здоровье ПК", "PC health"), -1, t->text);
+        text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100),
+                      TR("Диски, батарея и стабильность системы за 30 дней", "Drives, battery and system stability over 30 days"), -1, t->dim, false);
+        draw_health_page(rise);
     } else {
         text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, L"GPU Affinity", -1, t->text);
         const WCHAR *gpu = A.ngpu ? A.gpu[0].name : TR("Видеокарта не найдена", "No GPU found");
@@ -1107,6 +1117,7 @@ static bool animate(f32 dt)
         else if (i == HV_PKCLEAR) on = A.hover.type == HT_PKCLEAR;
         else if (i == HV_PKOK) on = A.hover.type == HT_PKOK;
         else if (i == HV_PKCANCEL) on = A.hover.type == HT_PKCANCEL;
+        else if (i == HV_HLREFRESH) on = A.hover.type == HT_HLREFRESH;
         else if (A.hover.type < countof(hv_of) && A.hover.type != HT_NONE) on = hv_of[A.hover.type] == i && A.hover.type != HT_PICK;
         if (i == HV_SLIDER && A.dragging) on = true;
         anim |= approach(&A.hv[i], on ? 1.f : 0.f, 22.f, dt);
@@ -1149,6 +1160,10 @@ static bool animate(f32 dt)
     anim |= spring_step(&A.hw_scroll, &A.hw_scroll_v, A.hw_scroll_target, 24.f, dt);
     bool hw_sb = A.page == PG_HW && hw_max_scroll() > 0 && A.mx >= content_x0();
     anim |= approach(&A.hw_sb_t, hw_sb ? 1.f : 0.f, hw_sb ? 20.f : 7.f, dt);
+    A.hl_scroll_target = CLAMP(A.hl_scroll_target, 0.f, hl_max_scroll());
+    anim |= spring_step(&A.hl_scroll, &A.hl_scroll_v, A.hl_scroll_target, 24.f, dt);
+    bool hl_sb = A.page == PG_HEALTH && hl_max_scroll() > 0 && A.mx >= content_x0();
+    anim |= approach(&A.hl_sb_t, hl_sb ? 1.f : 0.f, hl_sb ? 20.f : 7.f, dt);
     anim |= don_animate(dt);
     anim |= confetti_animate(dt);
     return anim;
@@ -1238,6 +1253,7 @@ static Hit hit_test(int mx, int my)
         nav_box(i, &n);
         if (in_b(&n, x, y)) return (Hit){ HT_NAV, i };
     }
+    if (A.page == PG_HEALTH && HL.ncards && in_b(&A.hl_refresh, x, y)) return (Hit){ HT_HLREFRESH, -1 };
     if (A.page != PG_AFF) return h;
     Box sl = { A.slider.x - S(12), A.slider.y - S(14), A.slider.w + S(24), S(28) };
     if (!B.running && in_b(&sl, x, y)) h.type = HT_SLIDER;
@@ -1269,8 +1285,9 @@ static void lang_switch(void)
 {
     g_lang_ru = !g_lang_ru;
     lang_save();
-    // the parts page holds ready-made texts: read them again in the new language
+    // the parts and health pages hold ready-made texts: read them again in the new language
     hw_start(A.hwnd);
+    health_start(A.hwnd);
     A.page_t = 0;
     invalidate();
 }
@@ -1366,6 +1383,9 @@ static void mouse_up(int mx, int my)
             if (A.nbest) A.pk_mask = 1ull << A.best[0];
             break;
         case HT_PKCLEAR: A.pk_mask = 0; break;
+        case HT_HLREFRESH:
+            if (!HL.busy) health_start(A.hwnd);
+            break;
         case HT_PKOK:
             if (A.pk_mask && !(A.pk_mask == A.bound_mask && A.svc_on)) picker_close(true);
             break;
@@ -1416,11 +1436,12 @@ static void key_down(UINT vk)
         set_page((A.page + (vk == VK_PRIOR ? PG__COUNT - 1 : 1)) % PG__COUNT);
         return;
     }
-    if (A.page == PG_HW) {
-        if (vk == VK_UP || vk == VK_DOWN) A.hw_scroll_target += vk == VK_UP ? -S(60) : S(60);
-        if (vk == VK_PRIOR || vk == VK_NEXT) A.hw_scroll_target += (vk == VK_PRIOR ? -1.f : 1.f) * hw_view_h() * 0.8f;
-        if (vk == VK_HOME) A.hw_scroll_target = 0;
-        if (vk == VK_END) A.hw_scroll_target = hw_max_scroll();
+    if (A.page == PG_HW || A.page == PG_HEALTH) {
+        f32 *st = A.page == PG_HW ? &A.hw_scroll_target : &A.hl_scroll_target, ms = A.page == PG_HW ? hw_max_scroll() : hl_max_scroll();
+        if (vk == VK_UP || vk == VK_DOWN) *st += vk == VK_UP ? -S(60) : S(60);
+        if (vk == VK_PRIOR || vk == VK_NEXT) *st += (vk == VK_PRIOR ? -1.f : 1.f) * hw_view_h() * 0.8f;
+        if (vk == VK_HOME) *st = 0;
+        if (vk == VK_END) *st = ms;
         invalidate();
         return;
     }
@@ -1545,7 +1566,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             int t = A.hover.type;
             bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET || t == HT_MOK ||
                         t == HT_MCANCEL || t == HT_DONATE || t == HT_LANG || t == HT_MANUAL || t == HT_PKCELL || t == HT_PKBEST ||
-                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
+                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
             SetCursor(LoadCursorW(NULL, hand ? (LPCWSTR)IDC_HAND : (LPCWSTR)IDC_ARROW));
             return TRUE;
         }
@@ -1567,6 +1588,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         if (A.page == PG_HW) A.hw_scroll_target = CLAMP(A.hw_scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(90), 0.f, hw_max_scroll());
+        else if (A.page == PG_HEALTH)
+            A.hl_scroll_target = CLAMP(A.hl_scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(90), 0.f, hl_max_scroll());
         else A.scroll_target = CLAMP(A.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(76), 0.f, max_scroll());
         invalidate();
         return 0;
@@ -1590,6 +1613,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         invalidate();
         return 0;
     case WM_APP_BENCH:
+    case WM_APP_HEALTH:
         invalidate();
         return 0;
     case WM_APP_BENCH_DONE:
@@ -1722,6 +1746,7 @@ static bool app_open(void)
     A.nav_y = nb.y;
     A.lang_t = g_lang_ru ? 0.f : 1.f;
     hw_start(A.hwnd);
+    health_start(A.hwnd);
     A.last_frame = time_now();
     A.dirty = true;
     A.ready = true;

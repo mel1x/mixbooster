@@ -361,4 +361,5 @@ enum {
     WM_APP_BENCH_DONE,
     WM_APP_TASK_DONE,           // binding or resetting finished; wp = 1 on success
     WM_APP_HW,                  // the PC components are read
+    WM_APP_HEALTH,              // the PC health is read
 };

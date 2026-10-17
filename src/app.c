@@ -15,7 +15,7 @@ typedef struct Theme {
 } Theme;
 
 typedef struct Colors {
-    u32 bg, panel, panel_border, card, card_border, strip, nav_sel, nav_sel_border, nav_hover, ctl, ctl_hover, ctl_border, shadow, knob;
+    u32 bg, panel, panel_border, card, card_border, strip, nav_sel, nav_sel_border, nav_hover, ctl, ctl_hover, ctl_border, shadow, knob, overlay, pop_border;
 } Colors;
 
 enum {
@@ -34,10 +34,12 @@ enum {
     HT_MCANCEL,
     HT_MPANEL,
     HT_MOUT,
+    HT_DONATE,    // the sidebar button
+    HT_DON,       // the donation panel; idx: a wallet or DON_*
 };
 
 // Hover animation slots.
-enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
+enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
 
 typedef struct Hit {
     int type, idx;
@@ -151,6 +153,8 @@ static void theme_update(void)
         k->ctl_hover = RGBA(255, 255, 255, 26);
         k->ctl_border = RGBA(255, 255, 255, 14);
         k->shadow = RGBA(0, 0, 0, 120);
+        k->overlay = RGBA(0, 0, 0, 120);
+        k->pop_border = RGBA(255, 255, 255, 22);
         k->knob = RGBA(69, 69, 72, 255);
     } else {
         t->text = RGBA(0, 0, 0, 228);
@@ -173,6 +177,8 @@ static void theme_update(void)
         k->ctl_hover = RGBA(0, 0, 0, 18);
         k->ctl_border = RGBA(0, 0, 0, 20);
         k->shadow = RGBA(0, 0, 0, 60);
+        k->overlay = RGBA(0, 0, 0, 60);
+        k->pop_border = RGBA(0, 0, 0, 22);
         k->knob = RGBA(255, 255, 255, 255);
     }
     BOOL anim = TRUE;
@@ -279,6 +285,14 @@ static void winbtn_box(int i, Box *b)
     b->y = 0;
 }
 
+static void donate_box(Box *b)
+{
+    b->x = sb_x() + S(8);
+    b->w = sb_w() - S(16);
+    b->h = S(36);
+    b->y = (f32)A.H - sb_x() - S(8) - b->h;
+}
+
 static void nav_box(Box *b)
 {
     b->x = sb_x() + S(8);
@@ -352,7 +366,14 @@ static void draw_sidebar(void)
     text_draw_fit(FONT_TEXT_SEMIBOLD, fs, ix + isz + S(12), baseline_for(FONT_TEXT, fs, cy), n.x + n.w - ix - isz - S(18), L"GPU Affinity", -1,
                   t->text, false);
 
-    text_draw(FONT_TEXT, SC(12), x + S(18), floorf(y + h - S(18)), TR("Версия " MB_VER_STR, "Version " MB_VER_STR), -1, t->faint);
+    Box d;
+    donate_box(&d);
+    f32 hv = A.hv[HV_DONATE], dcy = d.y + d.h * 0.5f;
+    if (hv > 0) r_rect(d.x, d.y, d.w, d.h, color_alpha(c->nav_hover, hv), S(8));
+    text_draw_icon(0xEB51, SC(15), d.x + S(10) + isz * 0.5f, dcy, color_mix(t->faint, t->dim, hv));
+    text_draw_fit(FONT_TEXT, fs, d.x + S(10) + isz + S(12), baseline_for(FONT_TEXT, fs, dcy), d.w - isz - S(32), TR("Поддержать автора", "Support the author"),
+                  -1, color_mix(t->dim, t->text, hv), false);
+    text_draw(FONT_TEXT, SC(12), x + S(18), floorf(d.y - S(12)), TR("Версия " MB_VER_STR, "Version " MB_VER_STR), -1, t->faint);
 }
 
 static void draw_slider(void)
@@ -824,6 +845,8 @@ static void modal_close(bool start)
     invalidate();
 }
 
+#include "donate.c"
+
 static void draw_all(void)
 {
     const Theme *t = &A.th;
@@ -843,6 +866,8 @@ static void draw_all(void)
     draw_table();
     R.opacity = 1.f;
     if (A.modal || A.modal_t > 0) modal_pass(true);
+    if (D.open) draw_donate();
+    confetti_draw();
 
     for (int i = 0; i < 2; i++) {
         Box r;
@@ -879,6 +904,7 @@ static bool animate(f32 dt)
         if (i >= HV_TAB0) on = A.hover.type == HT_TAB && A.hover.idx == i - HV_TAB0;
         else if (i == HV_PICK0 || i == HV_PICK1) on = A.hover.type == HT_PICK && A.hover.idx == i - HV_PICK0;
         else if (i == HV_MOK || i == HV_MCANCEL) on = A.hover.type == (i == HV_MOK ? HT_MOK : HT_MCANCEL);
+        else if (i == HV_DONATE) on = A.hover.type == HT_DONATE;
         else if (A.hover.type < countof(hv_of) && A.hover.type != HT_NONE) on = hv_of[A.hover.type] == i && A.hover.type != HT_PICK;
         if (i == HV_SLIDER && A.dragging) on = true;
         anim |= approach(&A.hv[i], on ? 1.f : 0.f, 22.f, dt);
@@ -907,6 +933,8 @@ static bool animate(f32 dt)
     bool sb_on = max_scroll() > 0 && in_b(&A.body, (f32)A.mx, (f32)A.my);
     anim |= approach(&A.sb_t, sb_on ? 1.f : 0.f, sb_on ? 20.f : 7.f, dt);
     anim |= approach(&A.modal_t, A.modal ? 1.f : 0.f, A.modal ? 14.f : 18.f, dt);
+    anim |= don_animate(dt);
+    anim |= confetti_animate(dt);
     return anim;
 }
 
@@ -955,12 +983,29 @@ static Hit hit_test(int mx, int my)
             return h;
         }
     }
+    if (don_active()) {
+        h.type = HT_DON;
+        h.idx = in_box(D.panel, x, y) ? DON_PANEL : DON_OUT;
+        if (h.idx == DON_PANEL) {
+            if (in_box(D.close, x, y)) h.idx = DON_CLOSE;
+            else if (in_box(D.link, x, y)) h.idx = DON_LINK;
+            else
+                for (int i = 0; i < 8; i++)
+                    if (in_box(D.copy[i], x, y)) h.idx = i;
+        }
+        return h;
+    }
     if (A.modal) {
         modal_pass(false);
         h.type = in_b(&A.m_ok, x, y) ? HT_MOK : in_b(&A.m_cancel, x, y) ? HT_MCANCEL : in_b(&A.m_panel, x, y) ? HT_MPANEL : HT_MOUT;
         return h;
     }
     Box n;
+    donate_box(&n);
+    if (in_b(&n, x, y)) {
+        h.type = HT_DONATE;
+        return h;
+    }
     nav_box(&n);
     if (in_b(&n, x, y)) {
         h.type = HT_NAV;
@@ -1020,7 +1065,21 @@ static void mouse_down(int mx, int my)
 {
     Hit h = hit_test(mx, my);
     A.press = h;
+    if (D.open) {
+        if (D.closing) return;
+        if (h.idx == DON_OUT || h.idx == DON_CLOSE) {
+            don_close();
+        } else if (h.idx == DON_LINK) {
+            open_url(DON_LINK_URL);
+            confetti_burst();
+        } else if (h.idx >= 0) {
+            don_copy(h.idx);
+            confetti_burst();
+        }
+        return;
+    }
     switch (h.type) {
+    case HT_DONATE: don_open(); break;
     case HT_SLIDER:
         A.dragging = true;
         slider_set(mx);
@@ -1070,6 +1129,13 @@ static void mouse_up(int mx, int my)
 static void key_down(UINT vk)
 {
     bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
+    if (D.open) {
+        if (vk == VK_ESCAPE) don_close();
+        else if (vk == VK_DOWN || vk == VK_NEXT) D.scroll_target += S(vk == VK_NEXT ? 240.f : 48.f);
+        else if (vk == VK_UP || vk == VK_PRIOR) D.scroll_target -= S(vk == VK_PRIOR ? 240.f : 48.f);
+        invalidate();
+        return;
+    }
     if (A.modal) {
         if (vk == VK_ESCAPE) modal_close(false);
         else if (vk == VK_RETURN) modal_close(true);
@@ -1117,7 +1183,7 @@ static LRESULT nc_hit(HWND h, LPARAM lp)
         winbtn_box(i, &r);
         if (in_b(&r, x, y)) return HTCLIENT;
     }
-    if (A.modal) return HTCLIENT;
+    if (A.modal || D.open) return HTCLIENT;
     if (y < A.card.y - S(8) && x >= sb_x() + sb_w()) return HTCAPTION;
     if (x < sb_x() + sb_w() && y < sb_x() + S(72)) return HTCAPTION;
     return HTCLIENT;
@@ -1195,7 +1261,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (LOWORD(lp) == HTCLIENT) {
             int t = A.hover.type;
             bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET || t == HT_MOK ||
-                        t == HT_MCANCEL;
+                        t == HT_MCANCEL || t == HT_DONATE || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
             SetCursor(LoadCursorW(NULL, hand ? (LPCWSTR)IDC_HAND : (LPCWSTR)IDC_ARROW));
             return TRUE;
         }
@@ -1211,6 +1277,11 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         mouse_up(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         return 0;
     case WM_MOUSEWHEEL:
+        if (D.open) {
+            D.scroll_target = CLAMP(D.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(64), 0.f, MAX(0.f, D.content_h - D.view_h));
+            invalidate();
+            return 0;
+        }
         A.scroll_target = CLAMP(A.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(76), 0.f, max_scroll());
         invalidate();
         return 0;
@@ -1225,7 +1296,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         key_down((UINT)wp);
         return 0;
     case WM_TIMER:
-        if (!B.running) KillTimer(h, TIMER_TICK);
+        if (wp == TIMER_FLASH) KillTimer(h, TIMER_FLASH);
+        else if (!B.running) KillTimer(h, TIMER_TICK);
         invalidate();
         return 0;
     case WM_APP_BENCH:

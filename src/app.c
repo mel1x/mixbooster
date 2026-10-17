@@ -98,6 +98,7 @@ static struct {
     f32 prog;                 // the progress bar, eased
     f32 page_t;
     f32 lang_t;               // the language switch's selection: 0 Russian, 1 English
+    f32 score_t;              // the score gauge filling up when the parts page opens
     int page;                 // PG_*
     f32 nav_y, nav_v, nav_hov[PG__COUNT];
     f32 hw_scroll, hw_scroll_target, hw_scroll_v, hw_content_h, hw_sb_t;
@@ -447,7 +448,6 @@ static void draw_sidebar(void)
         u32 col = sel ? t->text : hov ? color_mix(t->dim, t->text, 0.6f) : t->dim;
         text_center(sel ? FONT_TEXT_SEMIBOLD : FONT_TEXT, SC(13), lb.x + half * (f32)k + half * 0.5f, lcy, k ? L"English" : L"Русский", col);
     }
-    text_draw(FONT_TEXT, SC(12), x + S(18), floorf(d.y - S(12)), TR("Версия " MB_VER_STR, "Version " MB_VER_STR), -1, t->faint);
 }
 
 static void draw_slider(void)
@@ -1137,6 +1137,10 @@ static bool animate(f32 dt)
     anim |= approach(&A.modal_t, A.modal ? 1.f : 0.f, A.modal ? 14.f : 18.f, dt);
     anim |= approach(&A.picker_t, A.picker ? 1.f : 0.f, A.picker ? 14.f : 18.f, dt);
     anim |= approach(&A.lang_t, g_lang_ru ? 0.f : 1.f, 18.f, dt);
+    if (A.page == PG_HW && HW.ready && A.score_t < 1.f) {
+        A.score_t = g_reduced_motion ? 1.f : MIN(1.f, A.score_t + dt / 1.1f);
+        anim = true;
+    }
     Box nb;
     nav_box(A.page, &nb);
     anim |= spring_step(&A.nav_y, &A.nav_v, nb.y, 26.f, dt);
@@ -1275,6 +1279,7 @@ static void set_page(int i)
 {
     if (i == A.page || i < 0 || i >= PG__COUNT) return;
     A.page = i;
+    A.score_t = 0;
     A.page_t = 0;
     A.dragging = false;
     invalidate();
@@ -1580,8 +1585,11 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         else if (!B.running) KillTimer(h, TIMER_TICK);
         invalidate();
         return 0;
-    case WM_APP_BENCH:
     case WM_APP_HW:
+        A.score_t = 0;
+        invalidate();
+        return 0;
+    case WM_APP_BENCH:
         invalidate();
         return 0;
     case WM_APP_BENCH_DONE:

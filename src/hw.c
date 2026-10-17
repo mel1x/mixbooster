@@ -242,6 +242,8 @@ static void hw_cpu(const CpuInfo *ci)
     c->glyph = 0xEEA1;
     wcopy(c->cat, countof(c->cat), TR("Процессор", "Processor"));
     wcopy(c->head, countof(c->head), ci->name[0] ? ci->name : L"CPU");
+    wcopy(SCORE.cpu_name, countof(SCORE.cpu_name), ci->name);
+    SCORE.threads = ci->count;
     int cores = 0, pcores = 0;
     for (int i = 0; i < ci->count; i++) cores = MAX(cores, ci->core[i] + 1);
     if (ci->hybrid) {
@@ -379,6 +381,9 @@ static void hw_gpu(void)
         if ((gi[m].integrated && !gi[i].integrated) || (gi[i].integrated == gi[m].integrated && gi[i].vram > gi[m].vram)) m = i;
     GpuInfo *g = &gi[m];
     wcopy(c->head, countof(c->head), g->name);
+    wcopy(SCORE.gpu_name, countof(SCORE.gpu_name), g->name);
+    SCORE.vram = g->vram;
+    SCORE.gpu_integrated = g->integrated;
     WCHAR vs[32] = L"";
     if (g->vram) fmt_size(vs, countof(vs), g->vram);
     const WCHAR *vend = gpu_vendor(g->id);
@@ -434,6 +439,9 @@ static void hw_ram(void)
     const WCHAR *type = SMB.nmem ? mem_type(SMB.mem[0].type) : L"";
     wfmt(c->head, countof(c->head), L"%s%s%s", total, type[0] ? L" " : L"", type);
     int speed = SMB.nmem ? (SMB.mem[0].conf ? SMB.mem[0].conf : SMB.mem[0].speed) : 0;
+    SCORE.ram = installed;
+    SCORE.ram_type = SMB.nmem ? SMB.mem[0].type : 0;
+    SCORE.ram_speed = speed;
     bool same = SMB.nmem > 0;
     for (int i = 1; i < SMB.nmem; i++) same &= SMB.mem[i].bytes == SMB.mem[0].bytes;
     WCHAR each[32];
@@ -578,6 +586,10 @@ static void hw_disks(void)
         WCHAR v[120];
         wfmt(v, countof(v), L"%s%s%s · %s%s%s", bt, bt[0] ? L" " : L"", ssd ? L"SSD" : L"HDD", sz, letters[i][0] ? L" · " : L"", letters[i]);
         row_add(c, true, model[0] ? model : path + 4, L"%s", v);
+        // the drive Windows lives on decides the score's drive part
+        WCHAR sys[4] = L"C:";
+        GetEnvironmentVariableW(L"SystemDrive", sys, countof(sys));
+        if (wcsstr(letters[i], sys)) SCORE.sys_disk = !ssd ? 1 : bus == BusTypeNvme ? 3 : 2;
         if (count == 1) wcopy(c->head, countof(c->head), model);
     }
     WCHAR ts[32];
@@ -744,6 +756,7 @@ again:
     memset(HW.card, 0, sizeof HW.card);
     memset(HW.stat, 0, sizeof HW.stat);
     memset(&SMB, 0, sizeof SMB);
+    memset(&SCORE, 0, sizeof SCORE);
     k_gb = TR("ГБ", "GB");
     k_tb = TR("ТБ", "TB");
     CpuInfo ci;
@@ -757,6 +770,7 @@ again:
     hw_displays();
     hw_net();
     hw_os();
+    score_compute();
     if (InterlockedExchange(&HW.again, 0)) goto again;
     InterlockedExchange(&HW.ready, 1);
     InterlockedExchange(&HW.busy, 0);

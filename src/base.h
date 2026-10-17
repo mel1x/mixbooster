@@ -362,4 +362,5 @@ enum {
     WM_APP_TASK_DONE,           // binding or resetting finished; wp = 1 on success
     WM_APP_HW,                  // the PC components are read
     WM_APP_HEALTH,              // the PC health is read
+    WM_APP_MSI_DONE,            // MSI settings applied or reset; wp = 1 on success
 };

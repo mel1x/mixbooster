@@ -27,6 +27,17 @@ binding to it by hand asks first: Windows handles most of its own interrupts the
 Data lives in `%ProgramData%\MixBooster` (`gpu-affinity.txt`, `log.txt`, the unpacked tools in `bin`).
 The binding is in `HKLM\SOFTWARE\MixBooster` (`GpuMask`).
 
+## MSI Mode
+
+The PCI devices with an interrupt, grouped like MSI_util v3: what each supports (MSI-X, MSI, line-based IRQ), what it
+runs on now, a switch for MSI (`MessageSignaledInterruptProperties\MSISupported`) and the interrupt priority
+(`Affinity Policy\DevicePriority`). Edits wait for *Apply* and take effect after a restart; changing a disk controller
+asks first, since a controller that fails to start can keep Windows from booting.
+
+What *Apply* changes is kept in `HKLM\SOFTWARE\MixBooster\Msi` with the values that were there before. The same service
+writes the wanted values back when a driver install drops them (it watches every device arrival), and *Reset all* puts
+the old values back. The service stays installed while it keeps either the GPU core or MSI settings.
+
 ## Build
 
 ```

@@ -1,6 +1,7 @@
-// The "MixBooster GPU Affinity" service: keeps the GPU on the chosen core. A driver install or update recreates the
-// device's registry key and drops the policy, so the service checks at startup and every time a display adapter
-// arrives, rewrites what is missing and restarts the GPU driver to apply it.
+// The "MixBooster GPU Affinity" service: keeps the GPU on the chosen core, and the MSI mode and interrupt priority
+// set on the MSI Mode page. A driver install or update recreates the device's registry key and drops them, so the
+// service checks at startup and every time a device arrives, rewrites what is missing and restarts the GPU driver to
+// apply its core (the MSI settings apply on the next boot).
 //
 // It is this same exe, copied to Program Files and started with --service.
 
@@ -41,6 +42,8 @@ static DWORD WINAPI svc_ctrl(DWORD ctrl, DWORD type, void *data, void *ctx)
 
 static void svc_check(void)
 {
+    int fixed = msi_restore();
+    if (fixed) log_msg("service: restored %d MSI setting(s), they apply after a reboot", fixed);
     u64 mask = 0;
     if (!reg_get_u64(L"GpuMask", &mask) || !mask) return;
     // A test in the app moves the GPU from core to core on purpose.
@@ -66,7 +69,8 @@ static void WINAPI svc_main(DWORD argc, LPWSTR *argv)
     filter.dbcc_size = sizeof filter;
     filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
     filter.dbcc_classguid = k_iface_display;
-    HDEVNOTIFY dn = RegisterDeviceNotificationW(g_svc_handle, &filter, DEVICE_NOTIFY_SERVICE_HANDLE);
+    // every device interface: a GPU, a network card or a USB controller whose driver was just installed
+    HDEVNOTIFY dn = RegisterDeviceNotificationW(g_svc_handle, &filter, DEVICE_NOTIFY_SERVICE_HANDLE | DEVICE_NOTIFY_ALL_INTERFACE_CLASSES);
 
     // At boot the policy is normally in place already; this only acts when an update removed it while Windows was off.
     if (WaitForSingleObject(g_svc_stop, 5000) == WAIT_TIMEOUT) svc_check();
@@ -154,7 +158,7 @@ static bool svc_install(void)
     }
     bool ok = false;
     if (s) {
-        SERVICE_DESCRIPTIONW d = { (LPWSTR)L"Keeps the GPU interrupts on the core chosen in MixBooster after driver updates." };
+        SERVICE_DESCRIPTIONW d = { (LPWSTR)L"Keeps the GPU interrupt core, the MSI mode and the interrupt priorities set in MixBooster after driver updates." };
         ChangeServiceConfig2W(s, SERVICE_CONFIG_DESCRIPTION, &d);
         SC_ACTION act[3] = { { SC_ACTION_RESTART, 10000 }, { SC_ACTION_RESTART, 60000 }, { SC_ACTION_NONE, 0 } };
         SERVICE_FAILURE_ACTIONSW fa = { 86400, NULL, NULL, 3, act };
@@ -203,7 +207,8 @@ static DWORD WINAPI bind_thread(void *arg)
         ok = svc_install();
         log_msg("bound the GPU to 0x%llx, service %s", (unsigned long long)mask, ok ? "running" : "failed");
     } else {
-        svc_remove();
+        // the service stays while it still keeps MSI settings
+        if (!msi_saved_any()) svc_remove();
         reg_delete(L"GpuMask");
         bridges_clear();
         gpus_apply(0, false, false);
@@ -221,6 +226,41 @@ static void task_start(HWND notify, bool bind, u64 mask)
     g_task_notify = notify;
     g_task_mask = mask;
     HANDLE t = CreateThread(NULL, 0, bind_thread, bind ? (void *)1 : NULL, 0, NULL);
+    if (t) CloseHandle(t);
+    else InterlockedExchange(&g_task_busy, 0);
+}
+
+// The MSI Mode page's "Apply" (a copy of the devices with their edits) and "Reset all" (NULL).
+static MsiDev g_msi_task[MSI_MAX];
+static int g_msi_task_n;
+
+static DWORD WINAPI msi_thread(void *arg)
+{
+    if (arg) {
+        for (int i = 0; i < g_msi_task_n; i++)
+            if (msi_dirty(&g_msi_task[i])) msi_apply_one(&g_msi_task[i]);
+    } else {
+        msi_reset_all();
+    }
+    // the service runs while it has something to keep
+    u64 mask = 0;
+    bool ok = true;
+    if (msi_saved_any()) ok = svc_install();
+    else if (!(reg_get_u64(L"GpuMask", &mask) && mask)) svc_remove();
+    InterlockedExchange(&g_task_busy, 0);
+    PostMessageW(g_task_notify, WM_APP_MSI_DONE, ok, 0);
+    return 0;
+}
+
+// devs NULL resets everything MixBooster set.
+static void msi_task_start(HWND notify, const MsiDev *devs, int n)
+{
+    if (g_task_busy) return;
+    InterlockedExchange(&g_task_busy, 1);
+    g_task_notify = notify;
+    if (devs) memcpy(g_msi_task, devs, sizeof(MsiDev) * (size_t)n);
+    g_msi_task_n = devs ? n : 0;
+    HANDLE t = CreateThread(NULL, 0, msi_thread, devs ? (void *)1 : NULL, 0, NULL);
     if (t) CloseHandle(t);
     else InterlockedExchange(&g_task_busy, 0);
 }

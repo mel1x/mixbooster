@@ -1,5 +1,5 @@
-// The window: a sidebar with the pages (only GPU Affinity for now), the test controls, the best cores and the results
-// table with a tab per run. Everything is drawn by render.c, laid out in DIPs and scaled by the window's DPI.
+// The window: a sidebar with the pages; GPU Affinity's test controls, best cores and results table with a tab per run
+// live here, the other pages in hwpage.c, healthpage.c and msipage.c. Everything is drawn by render.c, laid out in DIPs and scaled by the window's DPI.
 
 #ifdef MB_DEV_BUILD
 #define APP_CLASS L"MixBoosterDevWindow"  // runs next to an installed copy
@@ -49,18 +49,28 @@ enum {
     HT_COLHDR,    // a column header of the results table; idx: 0 the CPU, 1.. a metric column
     HT_TABPLUS,   // "+" after the run tabs: one more run
     HT_RERUN,     // "Run again" on an empty or unfinished run
+    HT_MSITOG,    // the MSI Mode page; idx: the device
+    HT_MSIPRIO,   // idx: the device
+    HT_MSIDDITEM, // the priority menu; idx: the item
+    HT_MSIDDPANEL,
+    HT_MSIDDOUT,
+    HT_MSIAPPLY,
+    HT_MSIDISCARD,
+    HT_MSIRESET,
+    HT_MSIREBOOT,
 };
 
 // Hover animation slots.
-enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_LANG, HV_MANUAL, HV_PKBEST, HV_PKCLEAR, HV_PKOK, HV_PKCANCEL, HV_HLREFRESH, HV_TABPLUS, HV_RERUN, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
+enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_LANG, HV_MANUAL, HV_PKBEST, HV_PKCLEAR, HV_PKOK, HV_PKCANCEL, HV_HLREFRESH, HV_TABPLUS, HV_RERUN, HV_MSIAPPLY, HV_MSIDISCARD, HV_MSIRESET, HV_MSIREBOOT, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
 
 // The sidebar pages, top to bottom.
-enum { PG_HW, PG_HEALTH, PG_AFF, PG__COUNT };
+enum { PG_HW, PG_HEALTH, PG_AFF, PG_MSI, PG__COUNT };
 
 static const struct { u32 glyph; const WCHAR *ru, *en; } k_pages[PG__COUNT] = {
     { 0xE7F4, L"Комплектующие ПК", L"PC components" },
     { 0xE95E, L"Здоровье ПК", L"PC health" },
     { 0xE950, L"GPU Affinity", L"GPU Affinity" },
+    { 0xE9E9, L"MSI Mode", L"MSI Mode" },
 };
 
 typedef struct Hit {
@@ -140,7 +150,7 @@ static struct {
 
 static void start_or_stop(void);
 // What the dialog before a test starts: the whole test, one run again, or one more run.
-enum { MM_FULL, MM_RERUN, MM_ADD, MM_CPU0 };
+enum { MM_FULL, MM_RERUN, MM_ADD, MM_CPU0, MM_MSIDISK, MM_REBOOT };
 static void ovl_update(void);
 
 static f32 S(f32 v) { return floorf(v * A.s + 0.5f); }
@@ -948,8 +958,12 @@ typedef struct ModalItem {
     const WCHAR *title, *text;
 } ModalItem;
 
+static int msi_modal_items(ModalItem *it);
+static void msi_modal_close(bool ok);
+
 static int modal_items(ModalItem *it, WCHAR *eta, int cap)
 {
+    if (A.mmode == MM_MSIDISK || A.mmode == MM_REBOOT) return msi_modal_items(it);
     if (A.mmode == MM_CPU0) {
         it[0] = (ModalItem){ 0xEEA1, TR("На CPU 0 работает сама Windows", "Windows itself works on CPU 0"),
                              TR("Туда по умолчанию идёт большая часть системных прерываний, DPC и фоновых задач. Видеокарта на том же ядре будет "
@@ -982,6 +996,63 @@ static int modal_items(ModalItem *it, WCHAR *eta, int cap)
     return 3;
 }
 
+// What changes between the dialogs: the title, its icon, and the two buttons.
+typedef struct ModalSpec {
+    WCHAR title[80];
+    u32 icon, ok_glyph;
+    bool warn;
+    const WCHAR *ok, *cancel;
+    f32 okw, cw;
+} ModalSpec;
+
+static void modal_spec(ModalSpec *m)
+{
+    m->icon = 0xE768;
+    m->ok_glyph = GLYPH_PLAY;
+    m->warn = false;
+    m->cancel = TR("Отмена", "Cancel");
+    m->okw = S(150);
+    m->cw = S(110);
+    switch (A.mmode) {
+    case MM_CPU0:
+        wcopy(m->title, countof(m->title), TR("CPU 0 лучше не выбирать", "Better not CPU 0"));
+        m->icon = 0xE7BA;
+        m->warn = true;
+        m->ok = TR("Всё равно привязать", "Bind anyway");
+        m->ok_glyph = 0xE71B;
+        m->cancel = TR("Выбрать другие", "Pick others");
+        m->okw = S(200);
+        m->cw = S(150);
+        break;
+    case MM_MSIDISK:
+        wcopy(m->title, countof(m->title), TR("Это контроллер дисков", "This is a disk controller"));
+        m->icon = 0xE7BA;
+        m->warn = true;
+        m->ok = TR("Всё равно изменить", "Change anyway");
+        m->ok_glyph = 0;
+        m->okw = S(190);
+        break;
+    case MM_REBOOT:
+        wcopy(m->title, countof(m->title), TR("Перезагрузить ПК?", "Restart the PC?"));
+        m->icon = 0xE777;
+        m->ok = TR("Перезагрузить", "Restart");
+        m->ok_glyph = 0xE777;
+        m->okw = S(170);
+        break;
+    case MM_RERUN:
+        wfmt(m->title, countof(m->title), TR("Перезапуск прогона %d", "Running run %d again"), A.mrun + 1);
+        m->ok = TR("Перезапустить", "Run again");
+        break;
+    case MM_ADD:
+        wfmt(m->title, countof(m->title), TR("Новый прогон %d", "New run %d"), A.mrun + 1);
+        m->ok = TR("Запустить", "Start");
+        break;
+    default:
+        wcopy(m->title, countof(m->title), TR("Перед началом теста", "Before the test"));
+        m->ok = TR("Начать тест", "Start test");
+    }
+}
+
 // Lays the dialog out; with draw set it also draws it.
 static void modal_pass(bool draw)
 {
@@ -1003,10 +1074,11 @@ static void modal_pass(bool draw)
     f32 k = ease_out_cubic(A.modal_t);
     f32 x = floorf(((f32)A.W - w) * 0.5f), y = floorf(((f32)A.H - h) * 0.5f + (1.f - k) * S(12));
     A.m_panel = (Box){ x, y, w, h };
-    bool warn = A.mmode == MM_CPU0;
-    f32 okw = warn ? S(200) : S(150), cw = warn ? S(150) : S(110);
-    A.m_ok = (Box){ x + w - pad - okw, y + h - pad - S(34), okw, S(34) };
-    A.m_cancel = (Box){ A.m_ok.x - S(8) - cw, A.m_ok.y, cw, S(34) };
+    ModalSpec ms;
+    modal_spec(&ms);
+    bool warn = ms.warn;
+    A.m_ok = (Box){ x + w - pad - ms.okw, y + h - pad - S(34), ms.okw, S(34) };
+    A.m_cancel = (Box){ A.m_ok.x - S(8) - ms.cw, A.m_ok.y, ms.cw, S(34) };
     if (!draw) return;
 
     R.opacity = k;
@@ -1017,13 +1089,8 @@ static void modal_pass(bool draw)
 
     f32 cy = y + pad + S(18), ic = S(36);
     r_rect(x + pad, cy - ic * 0.5f, ic, ic, color_alpha(warn ? t->warn : t->accent, 0.18f), S(9));
-    text_draw_icon(warn ? 0xE7BA : 0xE768, SC(16), x + pad + ic * 0.5f, cy, warn ? t->warn : t->text);
-    WCHAR title[64];
-    if (warn) wcopy(title, countof(title), TR("CPU 0 лучше не выбирать", "Better not CPU 0"));
-    else if (A.mmode == MM_RERUN) wfmt(title, countof(title), TR("Перезапуск прогона %d", "Running run %d again"), A.mrun + 1);
-    else if (A.mmode == MM_ADD) wfmt(title, countof(title), TR("Новый прогон %d", "New run %d"), A.mrun + 1);
-    else wcopy(title, countof(title), TR("Перед началом теста", "Before the test"));
-    text_draw(FONT_TEXT_SEMIBOLD, SC(19), x + pad + ic + S(14), baseline_for(FONT_TEXT_SEMIBOLD, SC(19), cy), title, -1, t->text);
+    text_draw_icon(ms.icon, SC(16), x + pad + ic * 0.5f, cy, warn ? t->warn : t->text);
+    text_draw(FONT_TEXT_SEMIBOLD, SC(19), x + pad + ic + S(14), baseline_for(FONT_TEXT_SEMIBOLD, SC(19), cy), ms.title, -1, t->text);
 
     f32 iy = y + pad + S(40) + S(20);
     for (int i = 0; i < n; i++) {
@@ -1043,13 +1110,9 @@ static void modal_pass(bool draw)
     }
     r_rect(x + S(1), A.m_ok.y - S(18), w - S(2), 1, t->sep, 0);
     Hit *hv = &A.hover;
-    draw_button(&A.m_cancel, warn ? TR("Выбрать другие", "Pick others") : TR("Отмена", "Cancel"), 0, BTN_NEUTRAL, A.hv[HV_MCANCEL],
-                A.press.type == HT_MCANCEL && hv->type == HT_MCANCEL, false);
-    if (warn)
-        draw_button(&A.m_ok, TR("Всё равно привязать", "Bind anyway"), 0xE71B, BTN_ACCENT, A.hv[HV_MOK], A.press.type == HT_MOK && hv->type == HT_MOK,
-                    g_task_busy != 0);
-    else draw_button(&A.m_ok, A.mmode == MM_RERUN ? TR("Перезапустить", "Run again") : A.mmode == MM_ADD ? TR("Запустить", "Start") : TR("Начать тест", "Start test"),
-                GLYPH_PLAY, BTN_ACCENT, A.hv[HV_MOK], A.press.type == HT_MOK && hv->type == HT_MOK, false);
+    draw_button(&A.m_cancel, ms.cancel, 0, BTN_NEUTRAL, A.hv[HV_MCANCEL], A.press.type == HT_MCANCEL && hv->type == HT_MCANCEL, false);
+    draw_button(&A.m_ok, ms.ok, ms.ok_glyph, BTN_ACCENT, A.hv[HV_MOK], A.press.type == HT_MOK && hv->type == HT_MOK,
+                A.mmode == MM_CPU0 && g_task_busy != 0);
     R.opacity = 1.f;
 }
 
@@ -1068,7 +1131,10 @@ static void modal_open_mode(int mode, int run)
 static void modal_close(bool start)
 {
     A.modal = false;
-    if (A.mmode == MM_CPU0) {
+    if (A.mmode == MM_MSIDISK || A.mmode == MM_REBOOT) {
+        if (start) A.modal_t = 0;
+        msi_modal_close(start);
+    } else if (A.mmode == MM_CPU0) {
         // bind anyway, or back to the picker with the selection kept
         A.modal_t = 0;
         if (start && !g_task_busy) {
@@ -1208,6 +1274,7 @@ static void picker_close(bool bind)
 #include "donate.c"
 #include "hwpage.c"
 #include "healthpage.c"
+#include "msipage.c"
 
 static void draw_all(void)
 {
@@ -1237,7 +1304,7 @@ static void draw_all(void)
                       TR("Диски, батарея и стабильность системы за 30 дней", "Drives, battery and system stability over 30 days"), -1, t->dim, false);
         draw_health_page(rise);
         ReleaseSRWLockShared(&HL.lock);
-    } else {
+    } else if (A.page == PG_AFF) {
         text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, L"GPU Affinity", -1, t->text);
         const WCHAR *gpu = A.ngpu ? A.gpu[0].name : TR("Видеокарта не найдена", "No GPU found");
         wfmt(sub, countof(sub), TR("%s · %s, %d потоков", "%s · %s, %d threads"), gpu, A.cpu.name[0] ? A.cpu.name : L"CPU", A.cpu.count);
@@ -1245,6 +1312,11 @@ static void draw_all(void)
         draw_bound_banner();
         draw_controls();
         draw_table();
+    } else {
+        text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, L"MSI Mode", -1, t->text);
+        text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100),
+                      TR("Режим прерываний и их приоритет для устройств PCI", "Interrupt mode and priority for PCI devices"), -1, t->dim, false);
+        draw_msi_page();
     }
     R.opacity = 1.f;
     if (A.modal || A.modal_t > 0) modal_pass(true);
@@ -1297,6 +1369,10 @@ static bool animate(f32 dt)
         else if (i == HV_HLREFRESH) on = A.hover.type == HT_HLREFRESH;
         else if (i == HV_TABPLUS) on = A.hover.type == HT_TABPLUS;
         else if (i == HV_RERUN) on = A.hover.type == HT_RERUN;
+        else if (i == HV_MSIAPPLY) on = A.hover.type == HT_MSIAPPLY;
+        else if (i == HV_MSIDISCARD) on = A.hover.type == HT_MSIDISCARD;
+        else if (i == HV_MSIRESET) on = A.hover.type == HT_MSIRESET;
+        else if (i == HV_MSIREBOOT) on = A.hover.type == HT_MSIREBOOT;
         else if (A.hover.type < countof(hv_of) && A.hover.type != HT_NONE) on = hv_of[A.hover.type] == i && A.hover.type != HT_PICK;
         if (i == HV_SLIDER && A.dragging) on = true;
         anim |= approach(&A.hv[i], on ? 1.f : 0.f, 22.f, dt);
@@ -1352,6 +1428,7 @@ static bool animate(f32 dt)
     anim |= spring_step(&A.hl_scroll, &A.hl_scroll_v, A.hl_scroll_target, 24.f, dt);
     bool hl_sb = A.page == PG_HEALTH && hl_max_scroll() > 0 && A.mx >= content_x0();
     anim |= approach(&A.hl_sb_t, hl_sb ? 1.f : 0.f, hl_sb ? 20.f : 7.f, dt);
+    anim |= msi_animate(dt);
     anim |= don_animate(dt);
     anim |= confetti_animate(dt);
     return anim;
@@ -1429,6 +1506,7 @@ static Hit hit_test(int mx, int my)
         h.type = in_b(&A.m_ok, x, y) ? HT_MOK : in_b(&A.m_cancel, x, y) ? HT_MCANCEL : in_b(&A.m_panel, x, y) ? HT_MPANEL : HT_MOUT;
         return h;
     }
+    if (msi_menu_hit(x, y, &h)) return h;
     Box n;
     donate_box(&n);
     if (in_b(&n, x, y)) {
@@ -1442,6 +1520,7 @@ static Hit hit_test(int mx, int my)
         if (in_b(&n, x, y)) return (Hit){ HT_NAV, i };
     }
     if (A.page == PG_HEALTH && A.hl_refresh.w > 0 && in_b(&A.hl_refresh, x, y)) return (Hit){ HT_HLREFRESH, -1 };
+    if (A.page == PG_MSI) return msi_hit(x, y);
     if (A.page != PG_AFF) return h;
     Box sl = { A.slider.x - S(12), A.slider.y - S(14), A.slider.w + S(24), S(28) };
     if (!B.running && in_b(&sl, x, y)) h.type = HT_SLIDER;
@@ -1505,6 +1584,9 @@ static void set_page(int i)
     if (i == A.page || i < 0 || i >= PG__COUNT) return;
     A.page = i;
     A.score_t = 0;
+    // the MSI page reads the devices fresh each time, unless edits wait there
+    MP.dd = -1;
+    if (i == PG_MSI && !msi_dirty_count()) MS.ready = false;
     A.page_t = 0;
     A.dragging = false;
     invalidate();
@@ -1646,6 +1728,7 @@ static void mouse_up(int mx, int my)
                 task_start(A.hwnd, false, 0);
             }
             break;
+        default: msi_click(h); break;
         }
     }
     A.dragging = false;
@@ -1673,12 +1756,18 @@ static void key_down(UINT vk)
         else if (vk == VK_RETURN) modal_close(true);
         return;
     }
+    if (A.page == PG_MSI && MP.dd >= 0) {
+        if (vk == VK_ESCAPE) MP.dd = -1;
+        invalidate();
+        return;
+    }
     if (ctrl && (vk == VK_PRIOR || vk == VK_NEXT)) {
         set_page((A.page + (vk == VK_PRIOR ? PG__COUNT - 1 : 1)) % PG__COUNT);
         return;
     }
-    if (A.page == PG_HW || A.page == PG_HEALTH) {
-        f32 *st = A.page == PG_HW ? &A.hw_scroll_target : &A.hl_scroll_target, ms = A.page == PG_HW ? hw_max_scroll() : hl_max_scroll();
+    if (A.page == PG_HW || A.page == PG_HEALTH || A.page == PG_MSI) {
+        f32 *st = A.page == PG_HW ? &A.hw_scroll_target : A.page == PG_HEALTH ? &A.hl_scroll_target : &MP.scroll_target;
+        f32 ms = A.page == PG_HW ? hw_max_scroll() : A.page == PG_HEALTH ? hl_max_scroll() : msi_max_scroll();
         if (vk == VK_UP || vk == VK_DOWN) *st += vk == VK_UP ? -S(60) : S(60);
         if (vk == VK_PRIOR || vk == VK_NEXT) *st += (vk == VK_PRIOR ? -1.f : 1.f) * hw_view_h() * 0.8f;
         if (vk == VK_HOME) *st = 0;
@@ -1807,7 +1896,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             int t = A.hover.type;
             bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET || t == HT_MOK ||
                         t == HT_MCANCEL || t == HT_DONATE || t == HT_LANG || t == HT_MANUAL || t == HT_PKCELL || t == HT_PKBEST ||
-                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || t == HT_TABPLUS || t == HT_RERUN || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
+                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || t == HT_TABPLUS || t == HT_RERUN || (t >= HT_MSITOG && t <= HT_MSIREBOOT && t != HT_MSIDDPANEL && t != HT_MSIDDOUT) || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
             SetCursor(LoadCursorW(NULL, hand ? (LPCWSTR)IDC_HAND : (LPCWSTR)IDC_ARROW));
             return TRUE;
         }
@@ -1832,6 +1921,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (A.page == PG_HW) A.hw_scroll_target = CLAMP(A.hw_scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(90), 0.f, hw_max_scroll());
         else if (A.page == PG_HEALTH)
             A.hl_scroll_target = CLAMP(A.hl_scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(90), 0.f, hl_max_scroll());
+        else if (A.page == PG_MSI) {
+            MP.dd = -1;
+            MP.scroll_target = CLAMP(MP.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(90), 0.f, msi_max_scroll());
+        }
         else A.scroll_target = CLAMP(A.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(76), 0.f, max_scroll());
         invalidate();
         return 0;
@@ -1860,6 +1953,11 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         invalidate();
         return 0;
     case WM_APP_HEALTH:
+        invalidate();
+        return 0;
+    case WM_APP_MSI_DONE:
+        msi_done(wp != 0);
+        refresh_binding();
         invalidate();
         return 0;
     case WM_APP_BENCH_DONE:

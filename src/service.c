@@ -230,7 +230,7 @@ static DWORD WINAPI recover_thread(void *arg)
 {
     (void)arg;
     gpus_apply(bound_mask(), false, true);
-    reg_delete(L"BenchActive");
+    bench_end_mark();
     log_msg("recovered from an unfinished test");
     return 0;
 }

@@ -35,7 +35,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline_a, int show)
     if (set_dpi) set_dpi((HANDLE)-4 /*PER_MONITOR_AWARE_V2*/);
 
     // One window: a second start brings the first one up.
-    CreateMutexW(NULL, TRUE, L"Local\\MixBoosterApp");
+    CreateMutexW(NULL, TRUE, APP_CLASS);
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND w = FindWindowW(APP_CLASS, NULL);
         if (w) {

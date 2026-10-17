@@ -1,8 +1,13 @@
 // The window: a sidebar with the pages (only GPU Affinity for now), the test controls, the best cores and the results
 // table with a tab per run. Everything is drawn by render.c, laid out in DIPs and scaled by the window's DPI.
 
+#ifdef MB_DEV_BUILD
+#define APP_CLASS L"MixBoosterDevWindow"  // runs next to an installed copy
+#else
 #define APP_CLASS L"MixBoosterWindow"
+#endif
 #define TIMER_TICK 1
+#define HOTKEY_STOP 1
 
 typedef struct Theme {
     bool dark;
@@ -25,10 +30,14 @@ enum {
     HT_RESET,
     HT_TAB,       // idx: 0 = AVG, 1.. = run
     HT_ROW,       // idx: the CPU
+    HT_MOK,       // the dialog before the test
+    HT_MCANCEL,
+    HT_MPANEL,
+    HT_MOUT,
 };
 
 // Hover animation slots.
-enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
+enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
 
 typedef struct Hit {
     int type, idx;
@@ -69,6 +78,9 @@ static struct {
     f32 pick_t;               // 0..1 between the two pick tiles
     f32 prog;                 // the progress bar, eased
     f32 page_t;
+    bool modal;               // the dialog before the test
+    f32 modal_t;
+    Box m_panel, m_ok, m_cancel;
     f32 row_hov;
     int row_hov_idx;
     f32 scroll, scroll_target, scroll_v, sb_t;
@@ -79,6 +91,8 @@ static struct {
     int ntabs;
     f32 left_w, right_x, content_h;
 } A;
+
+static void start_or_stop(void);
 
 static f32 S(f32 v) { return floorf(v * A.s + 0.5f); }
 static f32 SC(f32 v) { return v * A.s; }
@@ -385,7 +399,7 @@ static void draw_controls(void)
     draw_slider();
     bool run = B.running != 0, stopping = run && B.cancel;
     Hit *h = &A.hover;
-    draw_button(&A.start, run ? (stopping ? TR("Останавливаю…", "Stopping…") : TR("Остановить", "Stop")) : TR("Начать тест", "Start test"),
+    draw_button(&A.start, run ? (stopping ? TR("Останавливаю…", "Stopping…") : TR("Остановить · F4", "Stop · F4")) : TR("Начать тест", "Start test"),
                 run ? 0xE71A : 0xE768, run ? BTN_NEUTRAL : BTN_ACCENT, A.hv[HV_START], A.press.type == HT_START && h->type == HT_START,
                 stopping || g_task_busy);
     if (!run) {
@@ -429,7 +443,7 @@ static void draw_controls(void)
         f32 my = A.bind.y + A.bind.h * 0.5f;
         text_draw(FONT_TEXT, SC(12.5f), rx, baseline_for(FONT_TEXT, SC(12.5f), my - S(9)), tail, -1, t->text);
         text_draw_fit(FONT_TEXT, SC(12), rx, baseline_for(FONT_TEXT, SC(12), my + S(10)), rr - rx,
-                      TR("Экран будет мигать — не трогайте ПК до конца теста", "The screen will flicker — leave the PC alone until the end"),
+                      TR("Экран будет мигать — не трогайте ПК. F4 остановит тест", "The screen will flicker — leave the PC alone. F4 stops the test"),
                       -1, t->faint, false);
         return;
     }
@@ -558,9 +572,10 @@ static void draw_tabs(void)
             x += S(20);
         }
         text_draw(sel ? FONT_TEXT_SEMIBOLD : FONT_TEXT, fs, x, baseline_for(FONT_TEXT, fs, cy), lbl, -1, col);
+        // A still dot, not a pulsing one: nothing animates while the test runs, so the GPU only draws the demo.
         if (run && i == B.run + 1) {
-            f32 p = 0.55f + 0.45f * sinf((f32)time_now() * 4.f), d = S(6);
-            r_rect(tb->x + tb->w - S(14) - d * 0.5f, floorf(cy - d * 0.5f), d, d, color_alpha(t->accent, p), d * 0.5f);
+            f32 d = S(6);
+            r_rect(tb->x + tb->w - S(14) - d * 0.5f, floorf(cy - d * 0.5f), d, d, t->accent, d * 0.5f);
         }
     }
 }
@@ -685,6 +700,130 @@ static void draw_table(void)
     }
 }
 
+// Greedy word wrap. Draws when draw is set; returns the number of lines either way.
+static int text_wrap(int font, f32 fs, f32 x, f32 y, f32 max_w, f32 line_h, const WCHAR *s, u32 col, bool draw)
+{
+    int n = wlen(s), lines = 0;
+    for (int a = 0; a < n; lines++) {
+        int end = a, fit = a;
+        while (end < n) {
+            int e = end;
+            while (e < n && s[e] != ' ') e++;
+            if (fit > a && text_width(font, fs, s + a, e - a) > max_w) break;
+            fit = e;
+            end = e + 1;
+        }
+        if (fit == a) fit = MIN(n, a + 1);
+        if (draw) text_draw(font, fs, x, floorf(y + line_h * (f32)lines + 0.5f), s + a, fit - a, col);
+        a = fit;
+        while (a < n && s[a] == ' ') a++;
+    }
+    return lines;
+}
+
+typedef struct ModalItem {
+    u32 glyph;          // 0: the F4 keycap
+    const WCHAR *title, *text;
+} ModalItem;
+
+static int modal_items(ModalItem *it, WCHAR *eta, int cap)
+{
+    f64 step = BENCH_SETTLE_SEC + BENCH_WARMUP_SEC + BENCH_MEASURE_SEC;
+    WCHAR d[48];
+    fmt_duration(d, countof(d), step * A.cpu.count * A.runs);
+    wfmt(eta, cap,
+         TR("Тест займёт %s. Экран будет гаснуть и уходить в полноэкранный режим — это перезапуск драйвера видеокарты на каждом ядре.",
+            "The test takes %s. The screen goes black and fullscreen now and then: the GPU driver restarts for every core."),
+         d);
+    it[0] = (ModalItem){ 0xE7BA, TR("Не трогайте ПК во время теста", "Leave the PC alone during the test"), eta };
+    it[1] = (ModalItem){ 0xE9D9, TR("Закройте всё, что нагружает ПК", "Close everything that loads the PC"),
+                         TR("Игры, браузер, лаунчеры, оверлеи, запись экрана, торренты — любая фоновая нагрузка на процессор или видеокарту исказит результаты.",
+                            "Games, the browser, launchers, overlays, screen recording, torrents: any background load on the CPU or GPU skews the results.") };
+    it[2] = (ModalItem){ 0, TR("Нужен ПК — нажмите F4", "Need the PC? Press F4"),
+                         TR("Тест остановится в любой момент, даже поверх полноэкранного окна, а видеокарта вернётся к прежней привязке.",
+                            "The test stops at any moment, even over the fullscreen window, and the GPU goes back to its previous binding.") };
+    return 3;
+}
+
+// Lays the dialog out; with draw set it also draws it.
+static void modal_pass(bool draw)
+{
+    const Theme *t = &A.th;
+    const Colors *c = &A.c;
+    ModalItem it[3];
+    WCHAR eta[256];
+    int n = modal_items(it, eta, countof(eta));
+    f32 w = MIN(S(520), (f32)A.W - S(40)), pad = S(28), tx = pad + S(48), tw = w - tx - pad;
+    f32 tfs = SC(14), dfs = SC(13), lh = S(19);
+    f32 h = pad + S(40) + S(20);
+    f32 item_h[3];
+    for (int i = 0; i < n; i++) {
+        int lines = text_wrap(FONT_TEXT, dfs, 0, 0, tw, lh, it[i].text, 0, false);
+        item_h[i] = S(22) + lh * (f32)lines;
+        h += item_h[i] + S(18);
+    }
+    h += S(12) + S(34) + pad;
+    f32 k = ease_out_cubic(A.modal_t);
+    f32 x = floorf(((f32)A.W - w) * 0.5f), y = floorf(((f32)A.H - h) * 0.5f + (1.f - k) * S(12));
+    A.m_panel = (Box){ x, y, w, h };
+    A.m_ok = (Box){ x + w - pad - S(150), y + h - pad - S(34), S(150), S(34) };
+    A.m_cancel = (Box){ A.m_ok.x - S(8) - S(110), A.m_ok.y, S(110), S(34) };
+    if (!draw) return;
+
+    R.opacity = k;
+    r_rect(0, 0, (f32)A.W, (f32)A.H, t->dark ? RGBA(0, 0, 0, 120) : RGBA(0, 0, 0, 70), 0);
+    r_rect_ex(x, y + S(8), w, h, c->shadow, S(12), 0, S(24));
+    r_rect(x, y, w, h, t->dark ? RGBA(43, 43, 46, 255) : RGBA(251, 251, 252, 255), S(12));
+    r_rect_ex(x, y, w, h, t->dark ? RGBA(255, 255, 255, 22) : RGBA(0, 0, 0, 22), S(12), 1.f, 0);
+
+    f32 cy = y + pad + S(18), ic = S(36);
+    r_rect(x + pad, cy - ic * 0.5f, ic, ic, color_alpha(t->accent, 0.18f), S(9));
+    text_draw_icon(0xE768, SC(16), x + pad + ic * 0.5f, cy, t->text);
+    text_draw(FONT_TEXT_SEMIBOLD, SC(19), x + pad + ic + S(14), baseline_for(FONT_TEXT_SEMIBOLD, SC(19), cy), TR("Перед началом теста", "Before the test"), -1,
+              t->text);
+
+    f32 iy = y + pad + S(40) + S(20);
+    for (int i = 0; i < n; i++) {
+        f32 gx = x + pad + S(18), gy = iy + S(10);
+        if (it[i].glyph) {
+            text_draw_icon(it[i].glyph, SC(18), gx, gy, t->dim);
+        } else {
+            f32 kw = S(34), kh = S(26);
+            r_rect(gx - kw * 0.5f, gy - kh * 0.5f, kw, kh, c->ctl, S(6));
+            r_rect_ex(gx - kw * 0.5f, gy - kh * 0.5f, kw, kh, c->ctl_border, S(6), 1.f, 0);
+            r_rect(gx - kw * 0.5f + S(1), gy + kh * 0.5f - S(3), kw - S(2), S(2), c->ctl_border, S(1));
+            text_center(FONT_TEXT_SEMIBOLD, SC(12), gx, gy - S(1), L"F4", t->text);
+        }
+        text_draw(FONT_TEXT_SEMIBOLD, tfs, x + tx, baseline_for(FONT_TEXT_SEMIBOLD, tfs, gy), it[i].title, -1, t->text);
+        text_wrap(FONT_TEXT, dfs, x + tx, baseline_for(FONT_TEXT, dfs, gy + S(22)), tw, lh, it[i].text, t->dim, true);
+        iy += item_h[i] + S(18);
+    }
+    r_rect(x + S(1), A.m_ok.y - S(18), w - S(2), 1, t->sep, 0);
+    Hit *hv = &A.hover;
+    draw_button(&A.m_cancel, TR("Отмена", "Cancel"), 0, BTN_NEUTRAL, A.hv[HV_MCANCEL], A.press.type == HT_MCANCEL && hv->type == HT_MCANCEL, false);
+    draw_button(&A.m_ok, TR("Начать тест", "Start test"), 0xE768, BTN_ACCENT, A.hv[HV_MOK], A.press.type == HT_MOK && hv->type == HT_MOK, false);
+    R.opacity = 1.f;
+}
+
+static void modal_open(void)
+{
+    A.modal = true;
+    A.modal_t = 0;
+    A.hover.type = HT_NONE;
+    invalidate();
+}
+
+static void modal_close(bool start)
+{
+    A.modal = false;
+    if (start) {
+        // Gone at once: no fade-out drawn over the start of the test.
+        A.modal_t = 0;
+        start_or_stop();
+    }
+    invalidate();
+}
+
 static void draw_all(void)
 {
     const Theme *t = &A.th;
@@ -703,6 +842,7 @@ static void draw_all(void)
     draw_controls();
     draw_table();
     R.opacity = 1.f;
+    if (A.modal || A.modal_t > 0) modal_pass(true);
 
     for (int i = 0; i < 2; i++) {
         Box r;
@@ -738,6 +878,7 @@ static bool animate(f32 dt)
         bool on = false;
         if (i >= HV_TAB0) on = A.hover.type == HT_TAB && A.hover.idx == i - HV_TAB0;
         else if (i == HV_PICK0 || i == HV_PICK1) on = A.hover.type == HT_PICK && A.hover.idx == i - HV_PICK0;
+        else if (i == HV_MOK || i == HV_MCANCEL) on = A.hover.type == (i == HV_MOK ? HT_MOK : HT_MCANCEL);
         else if (A.hover.type < countof(hv_of) && A.hover.type != HT_NONE) on = hv_of[A.hover.type] == i && A.hover.type != HT_PICK;
         if (i == HV_SLIDER && A.dragging) on = true;
         anim |= approach(&A.hv[i], on ? 1.f : 0.f, 22.f, dt);
@@ -750,7 +891,7 @@ static bool animate(f32 dt)
         anim |= spring_step(&A.tab_w, &wv, tb->w, 30.f, dt);
     }
     anim |= approach(&A.pick_t, (f32)A.pick, 20.f, dt);
-    anim |= approach(&A.prog, bench_progress(), 6.f, dt);
+    A.prog = bench_progress();
     if (A.page_t < 1.f) {
         A.page_t = g_reduced_motion ? 1.f : MIN(1.f, A.page_t + dt / 0.28f);
         anim = true;
@@ -765,8 +906,7 @@ static bool animate(f32 dt)
     anim |= spring_step(&A.scroll, &A.scroll_v, A.scroll_target, 24.f, dt);
     bool sb_on = max_scroll() > 0 && in_b(&A.body, (f32)A.mx, (f32)A.my);
     anim |= approach(&A.sb_t, sb_on ? 1.f : 0.f, sb_on ? 20.f : 7.f, dt);
-    // the pulsing dot on the tab of the run in progress
-    if (B.running && A.active) anim = true;
+    anim |= approach(&A.modal_t, A.modal ? 1.f : 0.f, A.modal ? 14.f : 18.f, dt);
     return anim;
 }
 
@@ -814,6 +954,11 @@ static Hit hit_test(int mx, int my)
             h.type = i ? HT_WINCLOSE : HT_WINMIN;
             return h;
         }
+    }
+    if (A.modal) {
+        modal_pass(false);
+        h.type = in_b(&A.m_ok, x, y) ? HT_MOK : in_b(&A.m_cancel, x, y) ? HT_MCANCEL : in_b(&A.m_panel, x, y) ? HT_MPANEL : HT_MOUT;
+        return h;
     }
     Box n;
     nav_box(&n);
@@ -864,7 +1009,9 @@ static void start_or_stop(void)
         A.tab = 1;
         A.nbest = 0;
         A.scroll = A.scroll_target = 0;
-        SetTimer(A.hwnd, TIMER_TICK, 250, NULL);
+        // Once a second for the countdown, and only while the window is in front (see app_loop).
+        SetTimer(A.hwnd, TIMER_TICK, 1000, NULL);
+        if (!RegisterHotKey(A.hwnd, HOTKEY_STOP, MOD_NOREPEAT, VK_F4)) log_msg("F4 is taken by another app: %lu", GetLastError());
     }
     invalidate();
 }
@@ -892,8 +1039,15 @@ static void mouse_up(int mx, int my)
         case HT_WINCLOSE: PostMessageW(A.hwnd, WM_CLOSE, 0, 0); break;
         case HT_WINMIN: ShowWindow(A.hwnd, SW_MINIMIZE); break;
         case HT_START:
-            if (!B.cancel && !g_task_busy) start_or_stop();
+            if (B.running) {
+                if (!B.cancel) start_or_stop();
+            } else if (!g_task_busy) {
+                modal_open();
+            }
             break;
+        case HT_MOK: modal_close(true); break;
+        case HT_MCANCEL:
+        case HT_MOUT: modal_close(false); break;
         case HT_BIND:
             if (!g_task_busy && A.nbest && !(A.bound_cpu == A.best[A.pick] && A.svc_on)) {
                 A.note[0] = 0;
@@ -916,6 +1070,11 @@ static void mouse_up(int mx, int my)
 static void key_down(UINT vk)
 {
     bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
+    if (A.modal) {
+        if (vk == VK_ESCAPE) modal_close(false);
+        else if (vk == VK_RETURN) modal_close(true);
+        return;
+    }
     if (ctrl && vk == VK_TAB && A.ntabs) {
         set_tab((A.tab + (shift ? A.ntabs - 1 : 1)) % A.ntabs);
         return;
@@ -958,6 +1117,7 @@ static LRESULT nc_hit(HWND h, LPARAM lp)
         winbtn_box(i, &r);
         if (in_b(&r, x, y)) return HTCLIENT;
     }
+    if (A.modal) return HTCLIENT;
     if (y < A.card.y - S(8) && x >= sb_x() + sb_w()) return HTCAPTION;
     if (x < sb_x() + sb_w() && y < sb_x() + S(72)) return HTCAPTION;
     return HTCLIENT;
@@ -1034,7 +1194,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
             int t = A.hover.type;
-            bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET;
+            bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET || t == HT_MOK ||
+                        t == HT_MCANCEL;
             SetCursor(LoadCursorW(NULL, hand ? (LPCWSTR)IDC_HAND : (LPCWSTR)IDC_ARROW));
             return TRUE;
         }
@@ -1053,6 +1214,13 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         A.scroll_target = CLAMP(A.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(76), 0.f, max_scroll());
         invalidate();
         return 0;
+    case WM_HOTKEY:
+        // F4 works over the fullscreen demo too: the test stops and the GPU goes back.
+        if (wp == HOTKEY_STOP && B.running) {
+            InterlockedExchange(&B.cancel, 1);
+            invalidate();
+        }
+        return 0;
     case WM_KEYDOWN:
         key_down((UINT)wp);
         return 0;
@@ -1065,6 +1233,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_APP_BENCH_DONE:
         KillTimer(h, TIMER_TICK);
+        UnregisterHotKey(h, HOTKEY_STOP);
         if (A.close_pending) {
             DestroyWindow(h);
             return 0;

@@ -300,11 +300,19 @@ static void set_phase(int phase, f64 len)
     PostMessageW(B.notify, WM_APP_BENCH, 0, 0);
 }
 
-// What the GPUs go back to after a test: the core the service keeps them on, or the Windows default.
+// What the GPUs go back to after a test: the core the service keeps them on, otherwise what they had before the test
+// (set by hand or another tool), saved in BenchRestore when it started. 0 is the Windows default.
 static u64 bound_mask(void)
 {
     u64 m = 0;
-    return reg_get_u64(L"GpuMask", &m) ? m : 0;
+    if (reg_get_u64(L"GpuMask", &m) && m) return m;
+    return reg_get_u64(L"BenchRestore", &m) ? m : 0;
+}
+
+static void bench_end_mark(void)
+{
+    reg_delete(L"BenchActive");
+    reg_delete(L"BenchRestore");
 }
 
 static bool measure_cpu(int run, int cpu)
@@ -380,6 +388,8 @@ static DWORD WINAPI bench_thread(void *arg)
         wcopy(B.error, countof(B.error), TR("Не удалось распаковать liblava и PresentMon", "Couldn't unpack liblava and PresentMon"));
     } else {
         lava_config();
+        // A test that was cut off (a crash, a power loss) is put right on the next start, see recover_thread.
+        reg_set_u64(L"BenchRestore", affinity_get(g[0].id));
         reg_set_u64(L"BenchActive", 1);
         for (int r = 0; r < B.runs && !B.cancel; r++)
             for (int c = 0; c < B.ncpu && !B.cancel; c++) {
@@ -392,7 +402,7 @@ static DWORD WINAPI bench_thread(void *arg)
             }
         set_phase(PH_RESTORE, 0);
         gpus_apply(bound_mask(), false, true);
-        reg_delete(L"BenchActive");
+        bench_end_mark();
     }
     AcquireSRWLockExclusive(&B.lock);
     B.phase = PH_IDLE;

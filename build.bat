@@ -52,6 +52,7 @@ if defined RCDEF set RCFLAGS=/nologo /d %RCDEF%
 rc %RCFLAGS% /fo build\%OUT%.res res\mixbooster.rc || exit /b 1
 set CFLAGS=/nologo /utf-8 /W3 /WX /std:c11 /GS- /Gw /Gy /MT /DNDEBUG
 if "%MODE%"=="debug" (set CFLAGS=/nologo /utf-8 /W3 /WX /std:c11 /Zi /Od /MTd)
+if defined RCDEF set CFLAGS=%CFLAGS% /D%RCDEF%
 cl %CFLAGS% /O2 src\main.c build\%OUT%.res /Fe:build\%OUT%.exe /Fo:build\ /Fd:build\ /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /INCREMENTAL:NO || exit /b 1
 goto :done
 
@@ -67,6 +68,7 @@ if defined RCDEF set RCFLAGS=-D%RCDEF%
 windres %RCFLAGS% -I res res\mixbooster.rc -O coff -o build\%OUT%.res.o || exit /b 1
 set CFLAGS=-std=c11 -O2 -s -DNDEBUG
 if "%MODE%"=="debug" set CFLAGS=-std=c11 -O0 -g
+if defined RCDEF set CFLAGS=%CFLAGS% -D%RCDEF%
 %CC% %CFLAGS% -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-missing-field-initializers -Wno-cast-function-type -mwindows ^
     src\main.c build\%OUT%.res.o -o build\%OUT%.exe -static ^
     -ld3d11 -ldxgi -ldwmapi -lole32 -luuid -lshell32 -luser32 -lgdi32 -ladvapi32 -lsetupapi -lcfgmgr32 || exit /b 1

@@ -19,6 +19,7 @@ typedef struct HlData {
     HwStat stat[4];
     u8 state;                       // the worst of all: HS_GOOD, HS_WARN or HS_BAD
     int disks, disks_ok, bsod, whea, devices;
+    int disk_err_gone;   // disk errors from drives no longer in the PC
 } HlData;
 
 // Built in HLT off-screen and swapped into HL.d whole, like the parts page.
@@ -70,35 +71,137 @@ static void fmt_hours(WCHAR *out, int cap, u64 h)
 
 #define DISK_EVENTS L"Provider[@Name='disk'] and (EventID=7 or EventID=11 or EventID=51 or EventID=153)"
 
-// Disk errors in the System log over 30 days, per physical disk: the events name "\Device\Harddisk0\DR0".
-static int disk_event_counts(int counts[32])
+// Disk errors in the System log over 30 days, per drive. The events name "\Device\Harddisk0\DR0", but that number is
+// handed out at boot and moves when a drive is added or taken out: the errors of a drive pulled yesterday would land on
+// the one that got its number today. So each error is pinned to a serial number: Windows logs every drive it brings
+// up (Microsoft-Windows-Partition/Diagnostic, event 1006, with the number and the serial), and an error belongs to the
+// last drive that came up under its number before the error. Errors with no such record keep the number.
+
+typedef struct DiskArrival {
+    u64 t;
+    int num;
+    WCHAR serial[64];
+} DiskArrival;
+
+static struct {
+    WCHAR serial[32][64];
+    int by_serial[32], nserial;
+    int by_num[32];        // errors with no drive on record for them
+    int total;
+} DE;
+
+// Letters and digits only, upper case: the log and the drive itself pad and punctuate the serial differently.
+static void serial_norm(WCHAR *out, int cap, const WCHAR *s)
 {
-    memset(counts, 0, sizeof(int) * 32);
+    int n = 0;
+    for (; s && *s && n < cap - 1; s++)
+        if (iswalnum(*s)) out[n++] = towupper(*s);
+    out[n] = 0;
+}
+
+static u64 ev_variant_u64(const EVT_VARIANT *v)
+{
+    switch (v->Type) {
+    case EvtVarTypeFileTime: return v->FileTimeVal;
+    case EvtVarTypeUInt32: return v->UInt32Val;
+    case EvtVarTypeUInt16: return v->UInt16Val;
+    case EvtVarTypeUInt64: return v->UInt64Val;
+    case EvtVarTypeInt32: return (u64)v->Int32Val;
+    case EvtVarTypeString: return v->StringVal ? (u64)wcstoull(v->StringVal, NULL, 10) : 0;
+    }
+    return 0;
+}
+
+static int disk_arrivals(DiskArrival *out, int cap)
+{
+    LPCWSTR paths[3] = { L"Event/System/TimeCreated/@SystemTime", L"Event/EventData/Data[@Name='DiskNumber']",
+                         L"Event/EventData/Data[@Name='SerialNumber']" };
+    EVT_HANDLE ctx = EvtCreateRenderContext(3, paths, EvtRenderContextValues);
+    if (!ctx) return 0;
+    // 40 days: the boot before the 30-day window named the drives of its first errors
+    EVT_HANDLE h = EvtQuery(NULL, L"Microsoft-Windows-Partition/Diagnostic", L"*[System[EventID=1006 and TimeCreated[timediff(@SystemTime) <= 3456000000]]]",
+                            EvtQueryChannelPath | EvtQueryReverseDirection);
+    int n = 0;
+    if (h) {
+        EVT_HANDLE ev[64];
+        DWORD got = 0;
+        static EVT_VARIANT vals[512];
+        while (n < cap && EvtNext(h, countof(ev), ev, 0, 0, &got)) {
+            for (DWORD i = 0; i < got; i++) {
+                DWORD used = 0, cnt = 0;
+                if (n < cap && EvtRender(ctx, ev[i], EvtRenderEventValues, sizeof vals, vals, &used, &cnt) && cnt >= 3 &&
+                    vals[2].Type == EvtVarTypeString && vals[2].StringVal) {
+                    out[n].t = ev_variant_u64(&vals[0]);
+                    out[n].num = (int)ev_variant_u64(&vals[1]);
+                    serial_norm(out[n].serial, countof(out[n].serial), vals[2].StringVal);
+                    if (out[n].serial[0]) n++;
+                }
+                EvtClose(ev[i]);
+            }
+        }
+        EvtClose(h);
+    }
+    EvtClose(ctx);
+    return n;
+}
+
+static void disk_event_counts(void)
+{
+    memset(&DE, 0, sizeof DE);
+    static DiskArrival arr[4096];
+    int narr = disk_arrivals(arr, countof(arr));
+    LPCWSTR tpath[1] = { L"Event/System/TimeCreated/@SystemTime" };
+    EVT_HANDLE tctx = EvtCreateRenderContext(1, tpath, EvtRenderContextValues);
     WCHAR q[512];
     wfmt(q, countof(q), L"*[System[%s and TimeCreated[timediff(@SystemTime) <= 2592000000]]]", DISK_EVENTS);
     EVT_HANDLE h = EvtQuery(NULL, L"System", q, EvtQueryChannelPath | EvtQueryReverseDirection);
-    if (!h) return 0;
-    int total = 0;
+    if (!h) {
+        if (tctx) EvtClose(tctx);
+        return;
+    }
     EVT_HANDLE ev[64];
     DWORD got = 0;
     static WCHAR xml[16384];
-    while (total < 9999 && EvtNext(h, countof(ev), ev, 0, 0, &got)) {
+    static EVT_VARIANT tv[8];
+    while (DE.total < 9999 && EvtNext(h, countof(ev), ev, 0, 0, &got)) {
         for (DWORD i = 0; i < got; i++) {
             DWORD used = 0, cnt = 0;
             if (EvtRender(NULL, ev[i], EvtRenderEventXml, sizeof xml - sizeof(WCHAR), xml, &used, &cnt)) {
                 xml[MIN(used / sizeof(WCHAR), countof(xml) - 1)] = 0;
                 const WCHAR *p = wcsstr(xml, L"Harddisk");
-                if (p) {
-                    long n = wcstol(p + 8, NULL, 10);
-                    if (n >= 0 && n < 32) counts[n]++;
+                long num = p ? wcstol(p + 8, NULL, 10) : -1;
+                u64 t = 0;
+                if (tctx && EvtRender(tctx, ev[i], EvtRenderEventValues, sizeof tv, tv, &used, &cnt) && cnt >= 1) t = ev_variant_u64(&tv[0]);
+                // the last drive that came up under this number before the error
+                int best = -1;
+                for (int k = 0; k < narr; k++)
+                    if (arr[k].num == num && arr[k].t <= t && (best < 0 || arr[k].t > arr[best].t)) best = k;
+                if (best >= 0) {
+                    int s = 0;
+                    while (s < DE.nserial && wcscmp(DE.serial[s], arr[best].serial)) s++;
+                    if (s == DE.nserial && s < countof(DE.serial)) wcopy(DE.serial[DE.nserial++], countof(DE.serial[0]), arr[best].serial);
+                    if (s < DE.nserial) DE.by_serial[s]++;
+                } else if (num >= 0 && num < 32) {
+                    DE.by_num[num]++;
                 }
+                DE.total++;
             }
             EvtClose(ev[i]);
-            total++;
         }
     }
     EvtClose(h);
-    return total;
+    if (tctx) EvtClose(tctx);
+}
+
+// The errors of the drive that is PhysicalDrive num now, with this serial.
+static int disk_errors_for(int num, const WCHAR *serial)
+{
+    WCHAR sn[64];
+    serial_norm(sn, countof(sn), serial);
+    int n = num >= 0 && num < 32 ? DE.by_num[num] : 0;
+    for (int s = 0; sn[0] && s < DE.nserial; s++)
+        if (!wcscmp(DE.serial[s], sn)) n += DE.by_serial[s];
+    return n;
 }
 
 // The NVMe SMART / Health Information log page (0x02), 512 bytes.
@@ -265,8 +368,8 @@ static void hl_disks(void)
 {
     WCHAR letters[32][24];
     disk_letters(letters);
-    int errors[32];
-    disk_event_counts(errors);
+    disk_event_counts();
+    int shown = 0;
     for (int i = 0; i < 32; i++) {
         WCHAR path[32];
         wfmt(path, countof(path), L"\\\\.\\PhysicalDrive%d", i);
@@ -277,7 +380,7 @@ static void hl_disks(void)
         STORAGE_PROPERTY_QUERY q = { StorageDeviceProperty, PropertyStandardQuery, { 0 } };
         u8 buf[1024];
         DWORD got;
-        WCHAR model[96] = L"";
+        WCHAR model[96] = L"", serial[96] = L"";
         int bus = 0;
         if (DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, buf, sizeof buf, &got, NULL)) {
             STORAGE_DEVICE_DESCRIPTOR *dd = (STORAGE_DEVICE_DESCRIPTOR *)buf;
@@ -286,6 +389,8 @@ static void hl_disks(void)
             if (dd->ProductIdOffset && dd->ProductIdOffset < got) strncat(tmp, (const char *)buf + dd->ProductIdOffset, sizeof tmp - strlen(tmp) - 1);
             MultiByteToWideChar(CP_ACP, 0, tmp, -1, model, countof(model));
             trim(model);
+            if (dd->SerialNumberOffset && dd->SerialNumberOffset < got)
+                MultiByteToWideChar(CP_ACP, 0, (const char *)buf + dd->SerialNumberOffset, -1, serial, countof(serial));
             bus = dd->BusType;
         }
         q.PropertyId = StorageDeviceSeekPenaltyProperty;
@@ -319,8 +424,10 @@ static void hl_disks(void)
         }
         CloseHandle(h);
         // Windows logged read errors (bad blocks, retries) on this disk: worth a backup and a closer look
-        if (errors[i]) {
-            row_add(c, false, TR("Ошибки в журнале Windows", "Errors in the Windows log"), TR("%d за 30 дней", "%d in 30 days"), errors[i]);
+        int errs = disk_errors_for(i, serial);
+        shown += errs;
+        if (errs) {
+            row_add(c, false, TR("Ошибки в журнале Windows", "Errors in the Windows log"), TR("%d за 30 дней", "%d in 30 days"), errs);
             row_state(c, HS_BAD);
             if (c->state < HS_WARN) {
                 WCHAR keep[48];
@@ -332,6 +439,8 @@ static void hl_disks(void)
         HLT.disks++;
         if (c->state == HS_GOOD) HLT.disks_ok++;
     }
+    // what is left belongs to drives taken out since
+    HLT.disk_err_gone = MAX(0, DE.total - shown);
 }
 
 // --- battery -------------------------------------------------------------------------------------------------------
@@ -462,7 +571,8 @@ static void hl_stability(void)
     HLT.whea = ev_count(L"Provider[@Name='Microsoft-Windows-WHEA-Logger']", &lw);
     int whea_fatal = ev_count(L"Provider[@Name='Microsoft-Windows-WHEA-Logger'] and (Level=1 or Level=2)", &lwf);
     int shut = ev_count(L"Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=41", &ls);
-    int disk = ev_count(DISK_EVENTS, &ld);
+    // only the drives still in the PC: a pulled drive's errors are no news about this one
+    int disk = MAX(0, ev_count(DISK_EVENTS, &ld) - HLT.disk_err_gone);
     ev_row(c, TR("Синие экраны", "Blue screens"), HLT.bsod, &lb, 3, HS_WARN);
     ev_row(c, TR("Аппаратные ошибки WHEA", "WHEA hardware errors"), HLT.whea, &lw, 0, whea_fatal ? HS_BAD : HS_WARN);
     ev_row(c, TR("Внезапные выключения", "Unexpected power-offs"), shut, &ls, 5, HS_WARN);

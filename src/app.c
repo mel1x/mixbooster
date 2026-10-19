@@ -1,5 +1,5 @@
 // The window: a sidebar with the pages; GPU Affinity's test controls, best cores and results table with a tab per run
-// live here, the other pages in hwpage.c, healthpage.c and msipage.c. Everything is drawn by render.c, laid out in DIPs and scaled by the window's DPI.
+// live here, the other pages in hwpage.c, healthpage.c, msipage.c, parkpage.c and gfx.c. Everything is drawn by render.c, laid out in DIPs and scaled by the window's DPI.
 
 #ifdef MB_DEV_BUILD
 #define APP_CLASS L"MixBoosterDevWindow"  // runs next to an installed copy
@@ -8,6 +8,7 @@
 #endif
 #define TIMER_TICK 1
 #define HOTKEY_STOP 1
+#define TIMER_PARK 3   // the parking page's live cores, once a second
 
 typedef struct Theme {
     bool dark;
@@ -58,19 +59,29 @@ enum {
     HT_MSIDISCARD,
     HT_MSIRESET,
     HT_MSIREBOOT,
+    HT_GFXTOG,    // the Graphics page; idx: the switch
+    HT_PRPLAN,    // the Core parking page; idx: the plan
+    HT_PRACT,     // "Turn on"; idx: the plan
+    HT_PRADD,     // "Add the MixBoost plan"
+    HT_PRSEG,     // idx: 0 plugged in, 1 on battery
+    HT_PRPARK,
+    HT_PRSLIDER,  // idx: PS_*
+    HT_REBOOT,    // "Restart needed" in the sidebar
 };
 
 // Hover animation slots.
 enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_LANG, HV_MANUAL, HV_PKBEST, HV_PKCLEAR, HV_PKOK, HV_PKCANCEL, HV_HLREFRESH, HV_TABPLUS, HV_RERUN, HV_MSIAPPLY, HV_MSIDISCARD, HV_MSIRESET, HV_MSIREBOOT, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
 
 // The sidebar pages, top to bottom.
-enum { PG_HW, PG_HEALTH, PG_AFF, PG_MSI, PG__COUNT };
+enum { PG_HW, PG_HEALTH, PG_AFF, PG_MSI, PG_PARK, PG_GFX, PG__COUNT };
 
 static const struct { u32 glyph; const WCHAR *ru, *en; } k_pages[PG__COUNT] = {
     { 0xE7F4, L"Комплектующие ПК", L"PC components" },
     { 0xE95E, L"Здоровье ПК", L"PC health" },
     { 0xE950, L"GPU Affinity", L"GPU Affinity" },
     { 0xE9E9, L"MSI Mode", L"MSI Mode" },
+    { 0xE945, L"Парковка ядер", L"Core parking" },
+    { 0xE790, L"Графика", L"Graphics" },
 };
 
 typedef struct Hit {
@@ -140,6 +151,9 @@ static struct {
     f32 row_hov;
     int row_hov_idx;
     f32 scroll, scroll_target, scroll_v, sb_t;
+    WCHAR rb_text[160];       // what waits for a restart, for the sidebar card
+    int rb_n;
+    f32 rb_t, rb_hv;
 
     // layout, rebuilt every frame
     Box card, slider, start, pick_box[2], bind, reset, strip, body, rows;
@@ -244,6 +258,12 @@ static void refresh_binding(void)
     u64 m = 0;
     A.bound_mask = reg_get_u64(L"GpuMask", &m) ? m : 0;
     A.svc_on = A.bound_mask && svc_running();
+}
+
+static void refresh_reboot(void)
+{
+    A.rb_n = reboot_list(A.rb_text, countof(A.rb_text));
+    A.dirty = true;
 }
 
 static void refresh_best(void)
@@ -369,6 +389,14 @@ static void donate_box(Box *b)
     b->y -= b->h + S(6);
 }
 
+// "Restart needed", over the donate button while something waits for one: on every page.
+static void reboot_box(Box *b)
+{
+    donate_box(b);
+    b->h = S(62);
+    b->y -= b->h + S(10);
+}
+
 static void nav_box(int i, Box *b)
 {
     b->x = sb_x() + S(8);
@@ -455,6 +483,23 @@ static void draw_sidebar(void)
         text_draw_icon(k_pages[i].glyph, SC(15), ix + isz * 0.5f, cy, sel ? t->text : color_mix(t->faint, t->dim, A.nav_hov[i]));
         text_draw_fit(sel ? FONT_TEXT_SEMIBOLD : FONT_TEXT, fs, ix + isz + S(12), baseline_for(FONT_TEXT, fs, cy), n.x + n.w - ix - isz - S(18),
                       g_lang_ru ? k_pages[i].ru : k_pages[i].en, -1, sel ? t->text : color_mix(t->dim, t->text, A.nav_hov[i]), false);
+    }
+
+    if (A.rb_t > 0.003f) {
+        Box rb;
+        reboot_box(&rb);
+        f32 base = R.opacity, k = ease_out_cubic(A.rb_t);
+        R.opacity = base * k;
+        rb.y += floorf((1.f - k) * S(8) + 0.5f);
+        r_rect(rb.x, rb.y, rb.w, rb.h, color_mix(color_alpha(t->warn, 0.13f), color_alpha(t->warn, 0.2f), A.rb_hv), S(8));
+        r_rect_ex(rb.x, rb.y, rb.w, rb.h, color_alpha(t->warn, 0.35f), S(8), 1.f, 0);
+        f32 icx = rb.x + S(10) + isz * 0.5f, rcy = rb.y + S(21);
+        text_draw_icon(0xE777, SC(15), icx, rcy, t->warn);
+        f32 rtx = rb.x + S(10) + isz + S(12), rtw = rb.w - (rtx - rb.x) - S(10);
+        text_draw_fit(FONT_TEXT_SEMIBOLD, SC(13.5f), rtx, baseline_for(FONT_TEXT_SEMIBOLD, SC(13.5f), rcy), rtw, TR("Нужна перезагрузка", "Restart needed"), -1,
+                      t->text, false);
+        text_draw_fit(FONT_TEXT, SC(12), rtx, baseline_for(FONT_TEXT, SC(12), rb.y + S(42)), rtw, A.rb_text, -1, t->dim, false);
+        R.opacity = base;
     }
 
     Box d;
@@ -1279,6 +1324,8 @@ static void picker_close(bool bind)
 #include "hwpage.c"
 #include "healthpage.c"
 #include "msipage.c"
+#include "gfx.c"
+#include "parkpage.c"
 
 static void draw_all(void)
 {
@@ -1305,7 +1352,7 @@ static void draw_all(void)
         AcquireSRWLockShared(&HL.lock);
         text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, TR("Здоровье ПК", "PC health"), -1, t->text);
         text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100),
-                      TR("Диски, батарея и стабильность системы за 30 дней", "Drives, battery and system stability over 30 days"), -1, t->dim, false);
+                      TR("Диски, память, драйверы и стабильность системы за 30 дней", "Drives, memory, drivers and system stability over 30 days"), -1, t->dim, false);
         draw_health_page(rise);
         ReleaseSRWLockShared(&HL.lock);
     } else if (A.page == PG_AFF) {
@@ -1316,11 +1363,21 @@ static void draw_all(void)
         draw_bound_banner();
         draw_controls();
         draw_table();
-    } else {
+    } else if (A.page == PG_MSI) {
         text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, L"MSI Mode", -1, t->text);
         text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100),
                       TR("Режим прерываний и их приоритет для устройств PCI", "Interrupt mode and priority for PCI devices"), -1, t->dim, false);
         draw_msi_page();
+    } else if (A.page == PG_PARK) {
+        text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, TR("Парковка ядер", "Core parking"), -1, t->text);
+        text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100),
+                      TR("Схемы электропитания, парковка и частота процессора", "Power plans, core parking and processor speed"), -1, t->dim, false);
+        draw_park_page();
+    } else {
+        text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, TR("Графика", "Graphics"), -1, t->text);
+        text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100),
+                      TR("Настройки Windows для игр и видеокарты", "Windows settings for games and the GPU"), -1, t->dim, false);
+        draw_gfx_page();
     }
     R.opacity = 1.f;
     if (A.modal || A.modal_t > 0) modal_pass(true);
@@ -1433,6 +1490,10 @@ static bool animate(f32 dt)
     bool hl_sb = A.page == PG_HEALTH && hl_max_scroll() > 0 && A.mx >= content_x0();
     anim |= approach(&A.hl_sb_t, hl_sb ? 1.f : 0.f, hl_sb ? 20.f : 7.f, dt);
     anim |= msi_animate(dt);
+    anim |= gx_animate(dt);
+    anim |= pr_animate(dt);
+    anim |= approach(&A.rb_t, A.rb_n ? 1.f : 0.f, 12.f, dt);
+    anim |= approach(&A.rb_hv, A.hover.type == HT_REBOOT ? 1.f : 0.f, 20.f, dt);
     anim |= don_animate(dt);
     anim |= confetti_animate(dt);
     return anim;
@@ -1512,6 +1573,10 @@ static Hit hit_test(int mx, int my)
     }
     if (msi_menu_hit(x, y, &h)) return h;
     Box n;
+    if (A.rb_n) {
+        reboot_box(&n);
+        if (in_b(&n, x, y)) return (Hit){ HT_REBOOT, -1 };
+    }
     donate_box(&n);
     if (in_b(&n, x, y)) {
         h.type = HT_DONATE;
@@ -1525,6 +1590,8 @@ static Hit hit_test(int mx, int my)
     }
     if (A.page == PG_HEALTH && A.hl_refresh.w > 0 && in_b(&A.hl_refresh, x, y)) return (Hit){ HT_HLREFRESH, -1 };
     if (A.page == PG_MSI) return msi_hit(x, y);
+    if (A.page == PG_GFX) return gx_hit(x, y);
+    if (A.page == PG_PARK) return pr_hit(x, y);
     if (A.page != PG_AFF) return h;
     Box sl = { A.slider.x - S(12), A.slider.y - S(14), A.slider.w + S(24), S(28) };
     if (!B.running && in_b(&sl, x, y)) h.type = HT_SLIDER;
@@ -1591,6 +1658,14 @@ static void set_page(int i)
     // the MSI page reads the devices fresh each time, unless edits wait there
     MP.dd = -1;
     if (i == PG_MSI && !msi_dirty_count()) MS.ready = false;
+    // the other two read Windows fresh each time too; the parking page watches the cores while it is up
+    if (i == PG_GFX) GX.ready = false;
+    if (i == PG_PARK) {
+        PR.ready = false;
+        SetTimer(A.hwnd, TIMER_PARK, 1000, NULL);
+    } else {
+        KillTimer(A.hwnd, TIMER_PARK);
+    }
     A.page_t = 0;
     A.dragging = false;
     invalidate();
@@ -1670,6 +1745,7 @@ static void mouse_down(int mx, int my)
         break;
     case HT_PICK: A.pick = h.idx; break;
     case HT_TAB: set_tab(h.idx); break;
+    case HT_PRSLIDER: pr_press(h, mx); break;
     }
     invalidate();
 }
@@ -1732,9 +1808,15 @@ static void mouse_up(int mx, int my)
                 task_start(A.hwnd, false, 0);
             }
             break;
-        default: msi_click(h); break;
+        case HT_REBOOT: modal_open_mode(MM_REBOOT, 0); break;
+        default:
+            msi_click(h);
+            gx_click(h);
+            pr_click(h);
+            break;
         }
     }
+    pr_drop();
     A.dragging = false;
     A.press.type = HT_NONE;
     invalidate();
@@ -1769,9 +1851,17 @@ static void key_down(UINT vk)
         set_page((A.page + (vk == VK_PRIOR ? PG__COUNT - 1 : 1)) % PG__COUNT);
         return;
     }
-    if (A.page == PG_HW || A.page == PG_HEALTH || A.page == PG_MSI) {
-        f32 *st = A.page == PG_HW ? &A.hw_scroll_target : A.page == PG_HEALTH ? &A.hl_scroll_target : &MP.scroll_target;
-        f32 ms = A.page == PG_HW ? hw_max_scroll() : A.page == PG_HEALTH ? hl_max_scroll() : msi_max_scroll();
+    if (A.page != PG_AFF) {
+        f32 *st = A.page == PG_HW       ? &A.hw_scroll_target
+                  : A.page == PG_HEALTH ? &A.hl_scroll_target
+                  : A.page == PG_MSI    ? &MP.scroll_target
+                  : A.page == PG_PARK   ? &PR.scroll_target
+                                        : &GX.scroll_target;
+        f32 ms = A.page == PG_HW       ? hw_max_scroll()
+                 : A.page == PG_HEALTH ? hl_max_scroll()
+                 : A.page == PG_MSI    ? msi_max_scroll()
+                 : A.page == PG_PARK   ? pr_max_scroll()
+                                       : gx_max_scroll();
         if (vk == VK_UP || vk == VK_DOWN) *st += vk == VK_UP ? -S(60) : S(60);
         if (vk == VK_PRIOR || vk == VK_NEXT) *st += (vk == VK_PRIOR ? -1.f : 1.f) * hw_view_h() * 0.8f;
         if (vk == VK_HOME) *st = 0;
@@ -1883,6 +1973,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         A.mx = GET_X_LPARAM(lp);
         A.my = GET_Y_LPARAM(lp);
         if (A.dragging) slider_set(A.mx);
+        if (PR.drag >= 0) pr_drag(A.mx);
         Hit hit = hit_test(A.mx, A.my);
         if (hit.type != A.hover.type || hit.idx != A.hover.idx) A.hover = hit;
         invalidate();
@@ -1900,7 +1991,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             int t = A.hover.type;
             bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET || t == HT_MOK ||
                         t == HT_MCANCEL || t == HT_DONATE || t == HT_LANG || t == HT_MANUAL || t == HT_PKCELL || t == HT_PKBEST ||
-                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || t == HT_TABPLUS || t == HT_RERUN || (t >= HT_MSITOG && t <= HT_MSIREBOOT && t != HT_MSIDDPANEL && t != HT_MSIDDOUT) || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
+                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || t == HT_TABPLUS || t == HT_RERUN || (t >= HT_MSITOG && t <= HT_MSIREBOOT && t != HT_MSIDDPANEL && t != HT_MSIDDOUT) || (t >= HT_GFXTOG && t <= HT_REBOOT) || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
             SetCursor(LoadCursorW(NULL, hand ? (LPCWSTR)IDC_HAND : (LPCWSTR)IDC_ARROW));
             return TRUE;
         }
@@ -1928,6 +2019,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         else if (A.page == PG_MSI) {
             MP.dd = -1;
             MP.scroll_target = CLAMP(MP.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(90), 0.f, msi_max_scroll());
+        } else if (A.page == PG_PARK) {
+            PR.scroll_target = CLAMP(PR.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(90), 0.f, pr_max_scroll());
+        } else if (A.page == PG_GFX) {
+            GX.scroll_target = CLAMP(GX.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(90), 0.f, gx_max_scroll());
         }
         else A.scroll_target = CLAMP(A.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(76), 0.f, max_scroll());
         invalidate();
@@ -1943,6 +2038,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         key_down((UINT)wp);
         return 0;
     case WM_TIMER:
+        if (wp == TIMER_PARK) {
+            // still while a test runs: the counters would take from the measurement
+            if (A.page == PG_PARK && !B.running && !IsIconic(h)) pr_tick();
+            invalidate();
+            return 0;
+        }
         if (wp == TIMER_FLASH) KillTimer(h, TIMER_FLASH);
         else if (!B.running) KillTimer(h, TIMER_TICK);
         if (wp == TIMER_TICK) ovl_update();
@@ -1962,6 +2063,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_APP_MSI_DONE:
         msi_done(wp != 0);
         refresh_binding();
+        refresh_reboot();
         invalidate();
         return 0;
     case WM_APP_BENCH_DONE:
@@ -1987,6 +2089,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_APP_TASK_DONE: {
         bool was_bound = A.bound_mask != 0;
         refresh_binding();
+        refresh_reboot();
         // the parts page shows where the GPU interrupts go
         hw_refresh();
         if (A.bound_mask) {
@@ -2006,6 +2109,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (A.active) {
             theme_update();
             if (!g_task_busy) refresh_binding();
+            refresh_reboot();
         }
         invalidate();
         return 0;
@@ -2099,6 +2203,8 @@ static bool app_open(void)
     A.nav_y = nb.y;
     A.lang_t = g_lang_ru ? 0.f : 1.f;
     A.hw_t0 = A.hl_t0 = time_now();
+    refresh_reboot();
+    A.rb_t = A.rb_n ? 1.f : 0.f;
     hw_start(A.hwnd);
     health_start(A.hwnd);
     A.last_frame = time_now();

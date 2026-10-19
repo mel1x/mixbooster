@@ -263,6 +263,7 @@ static int gpus_apply(u64 mask, bool bridges, bool force)
             if (affinity_get(g[i].bridge[b]) != mask) {
                 affinity_set(g[i].bridge[b], mask);
                 log_msg("bridge %ls -> 0x%llx", g[i].bridge[b], (unsigned long long)mask);
+                reboot_mark(L"Gpu");
             }
         if (changed || force) {
             log_msg("gpu %ls -> 0x%llx", g[i].id, (unsigned long long)mask);
@@ -279,7 +280,11 @@ static void bridges_clear(void)
     GpuDev g[MAX_GPUS];
     int n = gpu_list(g, MAX_GPUS);
     for (int i = 0; i < n; i++)
-        for (int b = 0; b < g[i].nbridge; b++) affinity_set(g[i].bridge[b], 0);
+        for (int b = 0; b < g[i].nbridge; b++)
+            if (affinity_get(g[i].bridge[b])) {
+                affinity_set(g[i].bridge[b], 0);
+                reboot_mark(L"Gpu");
+            }
 }
 
 typedef struct CpuInfo {

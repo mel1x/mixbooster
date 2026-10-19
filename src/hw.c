@@ -147,14 +147,17 @@ static void date_dmy(WCHAR *s, int cap)
 typedef struct SmbMem {
     WCHAR loc[48], maker[48], part[64];
     u64 bytes;
-    int speed, conf, type;
+    int speed, conf, type, form;  // form: 0x09 DIMM, 0x0D SO-DIMM
 } SmbMem;
 
-static struct {
+typedef struct SmbData {
     SmbMem mem[16];
     int nmem, slots;
     WCHAR socket[48];
-} SMB;
+} SmbData;
+
+// The parts page's copy; the health page reads its own on its thread.
+static SmbData SMB;
 
 static void smb_string(const u8 *s, int idx, WCHAR *out, int cap)
 {
@@ -174,8 +177,9 @@ static void smb_string(const u8 *s, int idx, WCHAR *out, int cap)
 
 #define SMBIOS_PROVIDER 0x52534D42u  // 'RSMB'
 
-static void smbios_read(void)
+static void smbios_read(SmbData *out)
 {
+    memset(out, 0, sizeof *out);
     UINT size = GetSystemFirmwareTable(SMBIOS_PROVIDER, 0, NULL, 0);
     u8 *buf = size ? (u8 *)malloc(size) : NULL;
     if (!buf || GetSystemFirmwareTable(SMBIOS_PROVIDER, 0, buf, size) != size || size < 8) {
@@ -188,18 +192,19 @@ static void smbios_read(void)
         u8 type = p[0], hl = p[1];
         if (hl < 4 || p + hl > end) break;
         const u8 *str = p + hl;
-        if (type == 4 && hl > 0x04 && !SMB.socket[0]) smb_string(str, p[0x04], SMB.socket, countof(SMB.socket));
+        if (type == 4 && hl > 0x04 && !out->socket[0]) smb_string(str, p[0x04], out->socket, countof(out->socket));
         if (type == 17 && hl >= 0x15) {
-            SMB.slots++;
+            out->slots++;
             u16 sz = *(const u16 *)(p + 0x0C);
             u64 bytes = 0;
             if (sz == 0x7FFF && hl >= 0x20) bytes = (u64)*(const u32 *)(p + 0x1C) << 20;
             else if (sz != 0xFFFF && sz) bytes = (sz & 0x8000) ? (u64)(sz & 0x7FFF) << 10 : (u64)sz << 20;
-            if (bytes && SMB.nmem < countof(SMB.mem)) {
-                SmbMem *m = &SMB.mem[SMB.nmem++];
+            if (bytes && out->nmem < countof(out->mem)) {
+                SmbMem *m = &out->mem[out->nmem++];
                 m->bytes = bytes;
                 smb_string(str, p[0x10], m->loc, countof(m->loc));
                 m->type = p[0x12];
+                m->form = p[0x0E];
                 m->speed = *(const u16 *)(p + 0x15);
                 if (hl >= 0x1B) {
                     smb_string(str, p[0x17], m->maker, countof(m->maker));
@@ -775,13 +780,12 @@ static DWORD WINAPI hw_thread(void *arg)
 again:
     // everything is rebuilt: the texts are in the current language
     memset(&HWT, 0, sizeof HWT);
-    memset(&SMB, 0, sizeof SMB);
     memset(&SCORE, 0, sizeof SCORE);
     k_gb = TR("ГБ", "GB");
     k_tb = TR("ТБ", "TB");
     CpuInfo ci;
     cpu_info(&ci);
-    smbios_read();
+    smbios_read(&SMB);
     hw_cpu(&ci);
     hw_gpu();
     hw_ram();

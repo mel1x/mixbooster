@@ -1,6 +1,8 @@
 // "PC health": how the parts are doing, read on a worker thread.
 //   drives     NVMe: the drive's own health log; SATA SSD / HDD: SMART attributes and thresholds
 //   battery    worn capacity and charge cycles (laptops only)
+//   memory     the speed against the modules' rating (XMP / EXPO), the channels, the Windows memory test
+//   drivers    how old the GPU drivers are, the chipset's own driver or only Windows'
 //   stability  the last 30 days of the System event log: blue screens, WHEA hardware errors, unexpected
 //              power-offs, disk errors
 //   devices    devices whose driver is in trouble (not the ones switched off on purpose, which the playbook does)
@@ -11,14 +13,14 @@
 #pragma comment(lib, "wevtapi")
 #endif
 
-#define HL_CARDS 12
+#define HL_CARDS 14
 
 typedef struct HlData {
     HwCard card[HL_CARDS];
     int ncards;
     HwStat stat[4];
     u8 state;                       // the worst of all: HS_GOOD, HS_WARN or HS_BAD
-    int disks, disks_ok, bsod, whea, devices;
+    int disks, disks_ok, bsod, whea, devices, batteries;
     int disk_err_gone;   // disk errors from drives no longer in the PC
 } HlData;
 
@@ -480,6 +482,7 @@ static void hl_battery(void)
         if (DeviceIoControl(h, MB_IOCTL_BATTERY_QUERY_TAG, &wait, sizeof wait, &q.tag, sizeof q.tag, &got, NULL) && q.tag &&
             DeviceIoControl(h, MB_IOCTL_BATTERY_QUERY_INFORMATION, &q, sizeof q, &bi, sizeof bi, &got, NULL) && bi.designed && bi.full &&
             bi.designed != 0xFFFFFFFF) {
+            HLT.batteries++;
             HwCard *c = hl_card(0xE83F, TR("Батарея", "Battery"));
             if (c) {
                 WCHAR name[64] = L"", maker[64] = L"";
@@ -505,6 +508,291 @@ static void hl_battery(void)
         CloseHandle(h);
     }
     SetupDiDestroyDeviceInfoList(set);
+}
+
+// --- memory --------------------------------------------------------------------------------------------------------
+// The speed the modules run at against the speed they are sold for, the channels, and the Windows memory test.
+// Firmware reports no XMP or EXPO state, and reading the modules' SPD takes a driver; but the part number carries
+// the rated speed for the gaming brands (F4-3600C16, CMK16GX4M2B3200C16, KF436C17, BL8G36C16U4B, ...), and a kit
+// running far below it has its profile off.
+
+// The rated MT/s from a part number, 0 when it doesn't say.
+static int part_rated(const WCHAR *part)
+{
+    WCHAR s[64];
+    int n = 0;
+    for (const WCHAR *p = part; *p && n < countof(s) - 1; p++) s[n++] = towupper(*p);
+    s[n] = 0;
+    // Kingston FURY and HyperX: the DDR generation, then the hundreds (KF436C17 is DDR4-3600, KF560C40 DDR5-6000);
+    // ValueRAM: KVR32N22
+    if ((wstarts_with_i(s, L"KF") || wstarts_with_i(s, L"HX")) && (s[2] == '3' || s[2] == '4' || s[2] == '5') && iswdigit(s[3]) && iswdigit(s[4]) &&
+        !iswdigit(s[5]))
+        return ((s[3] - '0') * 10 + (s[4] - '0')) * 100;
+    if (wstarts_with_i(s, L"KVR") && iswdigit(s[3]) && iswdigit(s[4]) && !iswdigit(s[5])) return _wtoi(s + 3) * 100;
+    // four digits that look like a speed, between letters or dashes: F4-3600C16, CMK16GX4M2B3200C16, TF3D416G3600HC18, AX4U32008G16
+    for (int i = 1; i + 4 <= n; i++) {
+        if (iswdigit(s[i - 1]) || !iswdigit(s[i]) || !iswdigit(s[i + 1]) || !iswdigit(s[i + 2]) || !iswdigit(s[i + 3])) continue;
+        int v = (s[i] - '0') * 1000 + (s[i + 1] - '0') * 100 + (s[i + 2] - '0') * 10 + (s[i + 3] - '0');
+        if ((s[i - 1] == '-' || iswalpha(s[i - 1])) && v >= 1600 && v <= 9600 && v % 100 <= 66) return v;
+    }
+    // two digits after the size, the hundreds: BL8G36C16U4B, CP16G60C36U5B, CT16G48C40U5
+    for (int i = 1; i + 3 < n; i++)
+        if (s[i - 1] == 'G' && iswdigit(s[i - 2]) && iswdigit(s[i]) && iswdigit(s[i + 1]) && s[i + 2] == 'C') {
+            int v = ((s[i] - '0') * 10 + (s[i + 1] - '0')) * 100;
+            if (v >= 1600 && v <= 9600) return v;
+        }
+    // three digits after the size, the tens: PVS416G320C6K
+    for (int i = 1; i + 4 < n; i++)
+        if (s[i - 1] == 'G' && iswdigit(s[i - 2]) && iswdigit(s[i]) && iswdigit(s[i + 1]) && iswdigit(s[i + 2]) && s[i + 3] == 'C') {
+            int v = ((s[i] - '0') * 100 + (s[i + 1] - '0') * 10 + (s[i + 2] - '0')) * 10;
+            if (v >= 1600 && v <= 9600) return v;
+        }
+    return 0;
+}
+
+static bool lpddr(int type) { return type == 0x1B || type == 0x1C || type == 0x1D || type == 0x1E || type == 0x23; }
+
+// The latest result of the Windows Memory Diagnostic (mdsched): 1 no errors, 2 errors found, 0 never run.
+static int mem_diag(FILETIME *when)
+{
+    memset(when, 0, sizeof *when);
+    EVT_HANDLE h = EvtQuery(NULL, L"System", L"*[System[Provider[@Name='Microsoft-Windows-MemoryDiagnostics-Results']]]",
+                            EvtQueryChannelPath | EvtQueryReverseDirection);
+    if (!h) return 0;
+    int res = 0;
+    EVT_HANDLE ev;
+    DWORD got = 0;
+    while (!res && EvtNext(h, 1, &ev, 0, 0, &got) && got) {
+        EVT_HANDLE ctx = EvtCreateRenderContext(0, NULL, EvtRenderContextSystem);
+        static u8 vb[4096];
+        DWORD used = 0, cnt = 0;
+        if (ctx && EvtRender(ctx, ev, EvtRenderEventValues, sizeof vb, vb, &used, &cnt)) {
+            EVT_VARIANT *v = (EVT_VARIANT *)vb;
+            int id = v[EvtSystemEventID].Type == EvtVarTypeUInt16 ? v[EvtSystemEventID].UInt16Val : 0;
+            // 1101 / 1201: no errors; 1102 / 1202: hardware errors found. Other events (scheduled, cancelled) are skipped.
+            if (id == 1101 || id == 1201) res = 1;
+            else if (id == 1102 || id == 1202) res = 2;
+            if (res && v[EvtSystemTimeCreated].Type == EvtVarTypeFileTime) {
+                when->dwLowDateTime = (DWORD)v[EvtSystemTimeCreated].FileTimeVal;
+                when->dwHighDateTime = (DWORD)(v[EvtSystemTimeCreated].FileTimeVal >> 32);
+            }
+        }
+        if (ctx) EvtClose(ctx);
+        EvtClose(ev);
+    }
+    EvtClose(h);
+    return res;
+}
+
+static void fmt_date_ft(WCHAR *out, int cap, const FILETIME *ft)
+{
+    SYSTEMTIME st, lt;
+    FileTimeToSystemTime(ft, &st);
+    SystemTimeToTzSpecificLocalTime(NULL, &st, &lt);
+    wfmt(out, cap, L"%02d.%02d.%d", lt.wDay, lt.wMonth, lt.wYear);
+}
+
+static void hl_memory(bool laptop)
+{
+    static SmbData sm;
+    smbios_read(&sm);
+    if (!sm.nmem) return;
+    HwCard *c = hl_card(0xE964, TR("Оперативная память", "Memory"));
+    if (!c) return;
+    u64 total = 0;
+    for (int i = 0; i < sm.nmem; i++) total += sm.mem[i].bytes;
+    const SmbMem *m0 = &sm.mem[0];
+    int conf = m0->conf ? m0->conf : m0->speed, rated = 0, max_spd = 0;
+    bool mixed = false, dimm = m0->form == 0x09 && !laptop && !lpddr(m0->type);
+    for (int i = 0; i < sm.nmem; i++) {
+        int r = part_rated(sm.mem[i].part);
+        if (r && (!rated || r < rated)) rated = r;  // a mixed kit runs at its slowest
+        if (sm.mem[i].speed && (!max_spd || sm.mem[i].speed < max_spd)) max_spd = sm.mem[i].speed;
+        mixed |= sm.mem[i].bytes != m0->bytes || _wcsicmp(sm.mem[i].part, m0->part) != 0;
+    }
+    WCHAR sz[32];
+    fmt_size(sz, countof(sz), total);
+    const WCHAR *type = mem_type(m0->type);
+    wfmt(c->head, countof(c->head), L"%s%s%s", sz, type[0] ? L" " : L"", type);
+    if (conf) wfmt(c->sub, countof(c->sub), TR("%d МТ/с · модулей: %d", "%d MT/s · %d module(s)"), conf, sm.nmem);
+    u8 st = HS_GOOD;
+
+    // the speed against the rating: the part number's, else what the module itself reports as its maximum
+    int want = rated > conf ? rated : max_spd > conf ? max_spd : 0;
+    if (conf && want > conf + 100) {
+        row_add(c, false, TR("Частота", "Speed"), TR("%d из %d МТ/с", "%d of %d MT/s"), conf, want);
+        row_state(c, dimm ? HS_WARN : HS_NONE);
+        row_add(c, false, L"XMP / EXPO", L"%s", dimm ? TR("выключен - включите в BIOS", "off - turn it on in the BIOS") : TR("память может работать быстрее", "the memory could run faster"));
+        row_state(c, dimm ? HS_WARN : HS_NONE);
+        if (dimm) st = HS_WARN;
+    } else if (conf) {
+        row_add(c, false, TR("Частота", "Speed"), TR("%d МТ/с", "%d MT/s"), conf);
+        if (rated) {
+            row_add(c, false, L"XMP / EXPO", L"%s", rated > 3200 && m0->type == 0x1A ? TR("включён", "on") : rated > 5600 && m0->type == 0x22 ? TR("включён", "on") : TR("на заявленной частоте", "at the rated speed"));
+            row_state(c, HS_GOOD);
+        } else if (dimm) {
+            row_add(c, false, L"XMP / EXPO", L"%s", TR("не определить по модели", "can't tell from the model"));
+        }
+    }
+
+    // channels: one stick in a desktop with two or more slots halves the bandwidth
+    if (sm.nmem == 1 && sm.slots >= 2 && !lpddr(m0->type)) {
+        row_add(c, false, TR("Каналы", "Channels"), L"%s", TR("один - добавьте второй модуль", "single - add a second module"));
+        row_state(c, HS_WARN);
+        st = HS_WARN;
+    } else if (sm.nmem >= 2 && !lpddr(m0->type)) {
+        row_add(c, false, TR("Каналы", "Channels"), TR("%d модуля из %d слотов", "%d modules in %d slots"), sm.nmem, MAX(sm.slots, sm.nmem));
+        row_state(c, sm.nmem % 2 ? HS_NONE : HS_GOOD);
+    }
+    if (mixed) {
+        row_add(c, false, TR("Модули", "Modules"), L"%s", TR("разные: возможны сбои и сброс частоты", "different: may be unstable or slowed down"));
+        row_state(c, HS_WARN);
+        st = MAX(st, HS_WARN);
+    }
+
+    FILETIME when;
+    WCHAR d[32];
+    int diag = mem_diag(&when);
+    if (diag) fmt_date_ft(d, countof(d), &when);
+    if (diag == 2) {
+        row_add(c, false, TR("Проверка памяти Windows", "Windows memory test"), TR("найдены ошибки · %s", "errors found · %s"), d);
+        row_state(c, HS_BAD);
+        st = HS_BAD;
+    } else if (diag == 1) {
+        row_add(c, false, TR("Проверка памяти Windows", "Windows memory test"), TR("без ошибок · %s", "no errors · %s"), d);
+        row_state(c, HS_GOOD);
+    } else {
+        row_add(c, false, TR("Проверка памяти Windows", "Windows memory test"), L"%s", TR("не запускалась (mdsched)", "never run (mdsched)"));
+    }
+    hl_badge(c, st, NULL);
+}
+
+// --- drivers -------------------------------------------------------------------------------------------------------
+// How old the GPU drivers are, and whether the chipset has its maker's driver or only Windows' own.
+
+static const DEVPROPKEY k_drv_date = { { 0xa8b865dd, 0x2e3d, 0x4094, { 0xad, 0x97, 0xe5, 0x93, 0xa7, 0x0c, 0x75, 0xd6 } }, 2 };
+static const DEVPROPKEY k_drv_ver = { { 0xa8b865dd, 0x2e3d, 0x4094, { 0xad, 0x97, 0xe5, 0x93, 0xa7, 0x0c, 0x75, 0xd6 } }, 3 };
+static const DEVPROPKEY k_drv_provider = { { 0xa8b865dd, 0x2e3d, 0x4094, { 0xad, 0x97, 0xe5, 0x93, 0xa7, 0x0c, 0x75, 0xd6 } }, 9 };
+
+static u64 ft_u64(const FILETIME *f) { return ((u64)f->dwHighDateTime << 32) | f->dwLowDateTime; }
+
+// Days from a FILETIME to now; -1 for no date or a placeholder (Intel dates its chipset INFs 1968).
+static int days_since(const FILETIME *f)
+{
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    u64 t = ft_u64(f), n = ft_u64(&now);
+    if (!t || t > n || t < 125911584000000000ull /* 2000-01-01 */) return -1;
+    return (int)((n - t) / (864000000000ull));
+}
+
+static void fmt_age(WCHAR *out, int cap, int days)
+{
+    if (days < 0) out[0] = 0;
+    else if (days < 31) wcopy(out, cap, TR("свежий", "recent"));
+    else if (days < 365) wfmt(out, cap, TR("%d мес.", "%d mo"), days / 30);
+    else wfmt(out, cap, TR("%.1f г.", "%.1f y"), (f64)days / 365.0);
+}
+
+static void hl_drivers(void)
+{
+    HwCard *c = hl_card(0xE895, TR("Драйверы", "Drivers"));
+    if (!c) return;
+    u8 st = HS_GOOD;
+    int ngpu = 0, oldest = -1;
+    HDEVINFO set = SetupDiGetClassDevsW(&k_class_display, NULL, NULL, DIGCF_PRESENT);
+    SP_DEVINFO_DATA d = { sizeof d };
+    for (DWORD i = 0; set != INVALID_HANDLE_VALUE && SetupDiEnumDeviceInfo(set, i, &d); i++) {
+        GpuInfo g;
+        memset(&g, 0, sizeof g);
+        if (!SetupDiGetDeviceInstanceIdW(set, &d, g.id, countof(g.id), NULL) || !wstarts_with_i(g.id, L"PCI\\")) continue;
+        if (!SetupDiGetDeviceRegistryPropertyW(set, &d, SPDRP_FRIENDLYNAME, NULL, (BYTE *)g.name, sizeof g.name - 2, NULL) &&
+            !SetupDiGetDeviceRegistryPropertyW(set, &d, SPDRP_DEVICEDESC, NULL, (BYTE *)g.name, sizeof g.name - 2, NULL))
+            continue;
+        DEVPROPTYPE type;
+        SetupDiGetDevicePropertyW(set, &d, &k_drv_ver, &type, (BYTE *)g.ver, sizeof g.ver - 2, NULL, 0);
+        HKEY k = SetupDiOpenDevRegKey(set, &d, DICS_FLAG_GLOBAL, 0, DIREG_DRV, KEY_READ);
+        if (k != INVALID_HANDLE_VALUE) {
+            DWORD sz = sizeof g.amd;
+            RegGetValueW(k, NULL, L"RadeonSoftwareVersion", RRF_RT_REG_SZ, NULL, g.amd, &sz);
+            RegCloseKey(k);
+        }
+        FILETIME ft = { 0 };
+        SetupDiGetDevicePropertyW(set, &d, &k_drv_date, &type, (BYTE *)&ft, sizeof ft, NULL, 0);
+        int days = days_since(&ft);
+        bool integ = gpu_is_integrated(g.id);
+        // GPU makers ship a driver a month or two; an integrated one gets fewer, often through the laptop's maker
+        int limit = integ ? 365 : 180;
+        WCHAR ver[128], age[32], date[32] = L"";
+        gpu_driver_text(&g, ver, countof(ver));
+        WCHAR *paren = wcsstr(ver, L"  (");
+        if (paren) *paren = 0;
+        fmt_age(age, countof(age), days);
+        if (days >= 0) fmt_date_ft(date, countof(date), &ft);
+        row_add(c, true, g.name, L"%s%s%s%s%s", ver, date[0] ? L" · " : L"", date, age[0] ? L" · " : L"", age);
+        row_state(c, days > limit ? HS_WARN : days >= 0 ? HS_GOOD : HS_NONE);
+        if (days > limit) st = HS_WARN;
+        if (days > oldest) oldest = days;
+        ngpu++;
+    }
+    if (set != INVALID_HANDLE_VALUE) SetupDiDestroyDeviceInfoList(set);
+
+    // the chipset: the platform's own System devices (SMBus, PSP, the Management Engine) and who their driver is from
+    CpuInfo ci;
+    cpu_info(&ci);
+    bool amd = wcsstr(ci.name, L"AMD") != NULL, intel = wcsstr(ci.name, L"Intel") != NULL;
+    if (amd || intel) {
+        const WCHAR *ven = amd ? L"VEN_1022" : L"VEN_8086";
+        int vendor_drv = 0, total = 0, best_days = -1;
+        WCHAR best_ver[64] = L"";
+        FILETIME best_ft = { 0 };
+        set = SetupDiGetClassDevsW(NULL, L"PCI", NULL, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+        for (DWORD i = 0; set != INVALID_HANDLE_VALUE && SetupDiEnumDeviceInfo(set, i, &d); i++) {
+            WCHAR id[200], cls[64] = L"", prov[96] = L"", ver[64] = L"";
+            if (!SetupDiGetDeviceInstanceIdW(set, &d, id, countof(id), NULL) || !wcsstr(id, ven)) continue;
+            SetupDiGetDeviceRegistryPropertyW(set, &d, SPDRP_CLASS, NULL, (BYTE *)cls, sizeof cls - 2, NULL);
+            if (_wcsicmp(cls, L"System") && _wcsicmp(cls, L"SecurityDevices")) continue;
+            DEVPROPTYPE type;
+            SetupDiGetDevicePropertyW(set, &d, &k_drv_provider, &type, (BYTE *)prov, sizeof prov - 2, NULL, 0);
+            total++;
+            if (!prov[0] || wstarts_with_i(prov, L"Microsoft") || wstarts_with_i(prov, L"(Standard")) continue;
+            vendor_drv++;
+            FILETIME ft = { 0 };
+            SetupDiGetDevicePropertyW(set, &d, &k_drv_date, &type, (BYTE *)&ft, sizeof ft, NULL, 0);
+            SetupDiGetDevicePropertyW(set, &d, &k_drv_ver, &type, (BYTE *)ver, sizeof ver - 2, NULL, 0);
+            int days = days_since(&ft);
+            if (best_ver[0] == 0 || (days >= 0 && (best_days < 0 || days < best_days))) {
+                best_days = days;
+                best_ft = ft;
+                wcopy(best_ver, countof(best_ver), ver);
+            }
+        }
+        if (set != INVALID_HANDLE_VALUE) SetupDiDestroyDeviceInfoList(set);
+        const WCHAR *name = amd ? TR("Чипсет AMD", "AMD chipset") : TR("Чипсет Intel", "Intel chipset");
+        if (vendor_drv) {
+            WCHAR date[32] = L"";
+            if (best_days >= 0) fmt_date_ft(date, countof(date), &best_ft);
+            row_add(c, true, name, L"%s%s%s", best_ver[0] ? best_ver : TR("установлен", "installed"), date[0] ? L" · " : L"", date);
+            row_state(c, HS_GOOD);
+        } else if (total) {
+            row_add(c, true, name, L"%s", TR("не установлен: стоят драйверы Windows", "not installed: Windows' own drivers"));
+            row_state(c, HS_WARN);
+            st = HS_WARN;
+        }
+    }
+
+    if (!ngpu && !c->nrows) {
+        wcopy(c->head, countof(c->head), TR("Нет данных", "No data"));
+    } else if (st == HS_GOOD) {
+        wcopy(c->head, countof(c->head), TR("Драйверы в порядке", "Drivers are fine"));
+        WCHAR age[32];
+        fmt_age(age, countof(age), oldest);
+        if (oldest >= 0) wfmt(c->sub, countof(c->sub), TR("Драйвер видеокарты: %s", "GPU driver: %s"), age);
+    } else {
+        wcopy(c->head, countof(c->head), TR("Пора обновить", "Time to update"));
+        wcopy(c->sub, countof(c->sub), TR("Скачайте свежие с сайта NVIDIA, AMD или Intel", "Get fresh ones from NVIDIA, AMD or Intel"));
+    }
+    hl_badge(c, st, NULL);
 }
 
 // --- stability -----------------------------------------------------------------------------------------------------
@@ -680,6 +968,8 @@ again:
     k_tb = TR("ТБ", "TB");
     hl_disks();
     hl_battery();
+    hl_memory(HLT.batteries > 0);
+    hl_drivers();
     hl_stability();
     hl_devices();
     hl_stats();

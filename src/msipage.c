@@ -440,16 +440,7 @@ static Hit msi_hit(f32 x, f32 y)
 
 static void msi_reboot(void)
 {
-    HANDLE tok;
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) {
-        TOKEN_PRIVILEGES tp = { 1 };
-        LookupPrivilegeValueW(NULL, SE_SHUTDOWN_NAME, &tp.Privileges[0].Luid);
-        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-        AdjustTokenPrivileges(tok, FALSE, &tp, 0, NULL, NULL);
-        CloseHandle(tok);
-    }
-    if (!ExitWindowsEx(EWX_REBOOT, SHTDN_REASON_MAJOR_APPLICATION | SHTDN_REASON_MINOR_RECONFIG | SHTDN_REASON_FLAG_PLANNED)) {
-        log_msg("reboot failed: %lu", GetLastError());
+    if (!reboot_now()) {
         MP.note_bad = true;
         wcopy(MP.note, countof(MP.note), TR("Не удалось перезагрузить ПК, перезагрузите его сами", "Couldn't restart the PC, please restart it yourself"));
     }
@@ -500,10 +491,12 @@ static void msi_click(Hit h)
 static int msi_modal_items(ModalItem *it)
 {
     if (A.mmode == MM_REBOOT) {
-        it[0] = (ModalItem){ 0xE74E, TR("Сохраните открытые файлы", "Save your open files"),
-                             TR("ПК перезагрузится сразу. Несохранённое в открытых программах пропадёт.",
-                                "The PC restarts right away. Anything unsaved in open apps is lost.") };
-        return 1;
+        int n = 0;
+        if (A.rb_n) it[n++] = (ModalItem){ 0xE777, TR("Что применится", "What it applies"), A.rb_text };
+        it[n++] = (ModalItem){ 0xE74E, TR("Сохраните открытые файлы", "Save your open files"),
+                               TR("ПК перезагрузится сразу. Несохранённое в открытых программах пропадёт.",
+                                  "The PC restarts right away. Anything unsaved in open apps is lost.") };
+        return n;
     }
     it[0] = (ModalItem){ 0xEDA2, TR("Windows может не загрузиться", "Windows may not boot"),
                          TR("Если драйвер контроллера не справится с новым режимом, система не сможет прочитать диск при загрузке. Тогда "

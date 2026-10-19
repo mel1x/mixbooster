@@ -245,6 +245,7 @@ static DWORD WINAPI msi_thread(void *arg)
         msi_reset_all();
         pb_restore();
     }
+    reboot_mark(L"Msi");
     // the service runs while it has something to keep
     u64 mask = 0;
     bool ok = true;

@@ -43,6 +43,40 @@ when neither is left, whichever is reset last.
 When the MixBoost playbook's `MixBoost MSI Mode` task is there, the first *Apply* adopts the values it set and removes the
 task, so only one keeper is left; *Reset all* registers the task again with the playbook's `setMsiMode.ps1`.
 
+## Core parking
+
+What ParkControl does. The power plans, with a button to turn one on; for the chosen plan, core parking (min cores
+kept unparked, `CPMINCORES`, and on hybrid CPUs the P-cores' `CPMINCORES1` apart), the minimum and maximum
+processor state, plugged in and on battery. Changes go straight into the plan through powrprof and apply at once
+on the active one. Under them, every logical processor live: asleep or not, load, clock (performance counters).
+
+Where the MixBoost playbook's plan, *MixBoost Low Latency (HP)* (`11111111-1111-1111-1111-111111111111`), is
+missing, *Add the MixBoost plan* makes it the way `setPowerPlan.ps1` does: a copy of Ultimate Performance (else
+High performance, else Balanced) under that GUID with Hybred's Low Latency values, skipping the ones the Windows build
+doesn't have, and turns it on.
+
+## Graphics
+
+Switches for HAGS (`GraphicsDrivers\HwSchMode`, with what the GPU supports and runs now from D3DKMT), MPO
+(`Dwm\OverlayTestMode = 5` and, for 24H2, `GraphicsDrivers\DisableOverlays`), variable refresh rate and windowed-game
+optimizations (`DirectXUserGlobalSettings`, as Settings writes it) and fullscreen optimizations
+(`GameConfigStore\GameDVR_*`). They apply on a click; MPO and FSO keep what was there before in
+`HKLM\SOFTWARE\MixBooster\Gfx`, so turning them back on restores it.
+
+## Restart needed
+
+A card in the sidebar, on every page, while something waits for a restart: MSI Mode, the GPU's PCIe port, HAGS, MPO,
+or Windows Update. Each change leaves a mark in `HKLM\SOFTWARE\MixBooster\Reboot` with the boot it was made in; a
+mark from an earlier boot is dropped. The card opens the restart dialog.
+
+## PC health
+
+Drives (NVMe health log, SMART), battery, memory, drivers, stability over 30 days and device problems. Memory: the
+speed against the modules' rating, read from the part number for the gaming brands (an XMP / EXPO kit far below it
+has its profile off), single channel, mixed modules, and the last Windows Memory Diagnostic result. Drivers: each
+GPU driver's age (a warning after 6 months, 12 for an integrated GPU), and whether the chipset has AMD's or Intel's
+driver or only Windows' own.
+
 ## Build
 
 ```

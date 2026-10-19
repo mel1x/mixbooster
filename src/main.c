@@ -1,6 +1,7 @@
 // MixBooster: one translation unit. With --service it is the GPU affinity service, otherwise the app.
 #include "base.h"
 #include "com_min.h"
+#include "reboot.c"
 #include "render.c"
 #include "font.c"
 #include "gpu.c"
@@ -10,6 +11,7 @@
 #include "health.c"
 #include "bench.c"
 #include "service.c"
+#include "park.c"
 #include "app.c"
 
 static void init_paths(void)

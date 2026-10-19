@@ -649,7 +649,11 @@ static void draw_controls(void)
             bool ok = bench_avg(cpu, &avg);
             ReleaseSRWLockShared(&B.lock);
             if (ok) {
-                wfmt(st, countof(st), L"1%% low %.0f · 0.1%% low %.0f", avg.v[M_LOW1], avg.v[M_LOW01]);
+                // with several runs: in how many it was among the better half of the cores
+                if (g_core_runs[cpu] > 1)
+                    wfmt(st, countof(st), TR("1%% low %.0f · стабильно %d/%d", "1%% low %.0f · steady %d/%d"), avg.v[M_LOW1],
+                         g_core_top[cpu], g_core_runs[cpu]);
+                else wfmt(st, countof(st), L"1%% low %.0f · 0.1%% low %.0f", avg.v[M_LOW1], avg.v[M_LOW01]);
                 text_draw_fit(FONT_TEXT, SC(12), tx, baseline_for(FONT_TEXT, SC(12), b->y + S(37)), tmax, st, -1, t->dim, false);
             }
         }

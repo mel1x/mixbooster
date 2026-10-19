@@ -227,39 +227,97 @@ static int cmp_f32(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
-// Ranks the cores by the averaged results. Each metric becomes how far the core is from the median core, in parts:
-// +0.03 is 3% better (for the STDEV, lower is better). That is capped at 15% either way, so one lucky or unlucky
-// frame in the 0.01% low or the max can't carry a core alone. The score is the weighted sum.
+// How a core did in one run: each metric as its distance from that run's median core, in parts (+0.03 is 3% better;
+// for the STDEV lower is better), capped at 15% either way so one lucky or unlucky frame in the 0.01% low or the max
+// can't carry a core alone, then weighted. Against the same run's cores, so a run that went slower as a whole (a
+// warmer room, something in the background) doesn't count against the cores it measured.
+static f32 run_score(int r, int c, const f32 *med)
+{
+    f32 sc = 0;
+    for (int m = 0; m < M__COUNT; m++) {
+        f32 v = B.r[r][c].v[m], d = 0;
+        if (v > 0 && med[m] > 0) d = m == M_STDEV ? med[m] / v - 1.f : v / med[m] - 1.f;
+        sc += k_weight[m] * CLAMP(d, -0.15f, 0.15f);
+    }
+    return sc;
+}
+
+static f32 median_f32(f32 *v, int n)
+{
+    qsort(v, (size_t)n, sizeof(f32), cmp_f32);
+    return n & 1 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) * 0.5f;
+}
+
+// Per core, filled by bench_best: in how many runs it was in the better half, out of how many counted.
+static int g_core_top[MAX_CPUS], g_core_runs[MAX_CPUS];
+
+// Ranks the cores. A core is scored in every run on its own (run_score), and its final score is the median of those
+// scores minus their spread (the standard deviation): a core that was good in every run beats one that was the best
+// once and poor the next time, since the GPU stays on it for good. Only runs that measured at least 3/4 of the cores
+// count, a cut-off run's median isn't comparable; with none like that, every run does.
 // CPU 0 is measured but never suggested: Windows sends most of its own interrupts and DPCs there, which a quiet test
 // doesn't show, while a game does.
 static int bench_best(int *best, int want)
 {
-    CpuResult avg[MAX_CPUS];
-    f32 med[M__COUNT], col[MAX_CPUS];
-    int have = 0;
-    for (int c = 0; c < B.ncpu; c++) have += bench_avg(c, &avg[c]);
-    if (!have) return 0;
-    for (int m = 0; m < M__COUNT; m++) {
+    static f32 sc[BENCH_MAX_RUNS][MAX_CPUS];
+    bool use[BENCH_MAX_RUNS] = { 0 };
+    int full = 0;
+    for (int r = 0; r < B.runs; r++) {
         int k = 0;
+        for (int c = 0; c < B.ncpu; c++) k += B.r[r][c].ok;
+        use[r] = k * 4 >= B.ncpu * 3 && k >= 2;
+        full += use[r];
+    }
+    for (int r = 0; r < B.runs; r++)
+        if (!full) use[r] = true;
+    memset(g_core_top, 0, sizeof g_core_top);
+    memset(g_core_runs, 0, sizeof g_core_runs);
+    f32 col[MAX_CPUS];
+    for (int r = 0; r < B.runs; r++) {
+        if (!use[r]) continue;
+        f32 med[M__COUNT];
+        int k = 0;
+        for (int m = 0; m < M__COUNT; m++) {
+            k = 0;
+            for (int c = 0; c < B.ncpu; c++)
+                if (B.r[r][c].ok) col[k++] = B.r[r][c].v[m];
+            med[m] = k ? median_f32(col, k) : 0;
+        }
+        if (!k) {
+            use[r] = false;
+            continue;
+        }
         for (int c = 0; c < B.ncpu; c++)
-            if (avg[c].ok) col[k++] = avg[c].v[m];
-        qsort(col, (size_t)k, sizeof(f32), cmp_f32);
-        med[m] = k & 1 ? col[k / 2] : (col[k / 2 - 1] + col[k / 2]) * 0.5f;
+            if (B.r[r][c].ok) sc[r][c] = run_score(r, c, med);
+        // the better half of this run's cores
+        k = 0;
+        for (int c = 0; c < B.ncpu; c++)
+            if (B.r[r][c].ok) col[k++] = sc[r][c];
+        f32 mid = median_f32(col, k);
+        for (int c = 0; c < B.ncpu; c++)
+            if (B.r[r][c].ok) {
+                g_core_runs[c]++;
+                g_core_top[c] += sc[r][c] >= mid;
+            }
     }
     f32 score[MAX_CPUS];
+    int have = 0;
     for (int c = 0; c < B.ncpu; c++) {
         score[c] = -1e9f;
-        if (!avg[c].ok || c == 0) continue;
-        f32 sc = 0;
-        for (int m = 0; m < M__COUNT; m++) {
-            f32 v = avg[c].v[m], d = 0;
-            if (v > 0 && med[m] > 0) d = m == M_STDEV ? med[m] / v - 1.f : v / med[m] - 1.f;
-            sc += k_weight[m] * CLAMP(d, -0.15f, 0.15f);
-        }
-        score[c] = sc;
+        int n = 0;
+        for (int r = 0; r < B.runs; r++)
+            if (use[r] && B.r[r][c].ok) col[n++] = sc[r][c];
+        if (!n || c == 0) continue;
+        f32 mean = 0, var = 0;
+        for (int i = 0; i < n; i++) mean += col[i];
+        mean /= (f32)n;
+        for (int i = 0; i < n; i++) var += (col[i] - mean) * (col[i] - mean);
+        f32 spread = n > 1 ? sqrtf(var / (f32)(n - 1)) : 0;
+        score[c] = median_f32(col, n) - spread;
+        have++;
     }
     int n = 0;
-    for (; n < want; n++) {
+    for (; n < want && n < have; n++) {
         int b = -1;
         for (int c = 0; c < B.ncpu; c++)
             if (score[c] > -1e8f && (b < 0 || score[c] > score[b])) b = c;

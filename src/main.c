@@ -40,6 +40,14 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline_a, int show)
     int argc = 0;
     WCHAR **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv && argc > 1 && !_wcsicmp(argv[1], L"--service")) return svc_run();
+    // from the setup: close the app and stop the service before the files are replaced; on uninstall the service goes
+    if (argv && argc > 1 && (!_wcsicmp(argv[1], L"--shutdown") || !_wcsicmp(argv[1], L"--uninstall"))) {
+        app_shutdown();
+        if (!_wcsicmp(argv[1], L"--uninstall")) svc_remove();
+        else svc_stop();
+        return 0;
+    }
+    if (argv) upd_wait_old(argc, argv);
 
     lang_load();
     typedef BOOL (WINAPI *PFN_SetDpiCtx)(HANDLE);

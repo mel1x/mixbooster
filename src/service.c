@@ -124,6 +124,18 @@ static bool svc_stop_wait(SC_HANDLE s)
     return false;
 }
 
+// Stops the service when it runs (the setup replaces its exe); it stays installed and starts with Windows.
+static void svc_stop(void)
+{
+    SC_HANDLE m = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    SC_HANDLE s = m ? OpenServiceW(m, SVC_NAME, SERVICE_STOP | SERVICE_QUERY_STATUS) : NULL;
+    if (s) {
+        svc_stop_wait(s);
+        CloseServiceHandle(s);
+    }
+    if (m) CloseServiceHandle(m);
+}
+
 // true when the service is installed and running.
 static bool svc_running(void)
 {

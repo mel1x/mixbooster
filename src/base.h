@@ -40,6 +40,7 @@
 #include <cfgmgr32.h>
 #include <commdlg.h>
 #include <dbt.h>
+#include <winhttp.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdarg.h>
@@ -61,6 +62,8 @@
 #pragma comment(lib, "setupapi")
 #pragma comment(lib, "cfgmgr32")
 #pragma comment(lib, "comdlg32")
+#pragma comment(lib, "winhttp")
+#pragma comment(lib, "version")
 #endif
 
 #include "../res/version.h"
@@ -367,4 +370,6 @@ enum {
     WM_APP_MSI_DONE,            // MSI settings applied or reset; wp = 1 on success
     WM_APP_GAME_DONE,           // the service put in or removed for the game fixes; wp = 1 on success
     WM_APP_JOB_DONE,            // a switch's job ran; lp = the Job
+    WM_APP_UPDATE,              // the update check or download moved on
+    WM_APP_QUIT,                // --shutdown: close without putting a downloaded update in
 };

@@ -71,6 +71,7 @@ enum {
     HT_GMDEL,     // idx: the game added by hand
     HT_GMADD,
     HT_GMPAGE,    // the pages under the game list; idx: the page, GMP_PREV or GMP_NEXT
+    HT_UPDATE,    // the update card in the sidebar
 };
 
 // Hover animation slots.
@@ -159,6 +160,7 @@ static struct {
     WCHAR rb_text[160];       // what waits for a restart, for the sidebar card
     int rb_n;
     f32 rb_t, rb_hv;
+    f32 up_t;                 // the update card in the sidebar, opening and closing
     WCHAR toast[200];         // a switch's change that didn't go through, at the bottom for a few seconds
     f64 toast_until;
     f32 toast_t, toast_v;
@@ -187,6 +189,8 @@ static f32 SC(f32 v) { return v * A.s; }
 static bool in_b(const Box *b, f32 x, f32 y) { return x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h; }
 
 static void invalidate(void) { A.dirty = true; }
+
+#include "update.c"
 
 // A control held down sinks in a little and springs back when let go. Its drawing calls this with any pointer that
 // stays the same for it between frames (its Box) and whether it is held now; the answer is 0..1 (a little past
@@ -499,6 +503,16 @@ static void reboot_box(Box *b)
     b->y -= b->h + S(10);
 }
 
+// The update card: over "Restart needed" when that is there, else in its place.
+static void update_box(Box *b)
+{
+    donate_box(b);
+    b->h = S(62);
+    b->y -= b->h + S(10) + floorf((S(62) + S(10)) * ease_out_cubic(A.rb_t) + 0.5f);
+}
+
+static bool update_shown(void) { return upd_state() == UPD_DOWNLOADING || upd_state() == UPD_READY; }
+
 static void nav_box(int i, Box *b)
 {
     b->x = sb_x() + S(8);
@@ -629,6 +643,37 @@ static void draw_sidebar(void)
         text_draw_fit(FONT_TEXT_SEMIBOLD, SC(13.5f), rtx, baseline_for(FONT_TEXT_SEMIBOLD, SC(13.5f), rcy), rtw, TR("Нужна перезагрузка", "Restart needed"), -1,
                       t->text, false);
         text_draw_fit(FONT_TEXT, SC(12), rtx, baseline_for(FONT_TEXT, SC(12), rb.y + S(42)), rtw, A.rb_text, -1, t->dim, false);
+        R.opacity = base;
+    }
+
+    if (A.up_t > 0.003f) {
+        // the update: downloading with its progress, then ready to go in on a click
+        Box ub;
+        update_box(&ub);
+        bool ready = upd_state() == UPD_READY, hov = ready && A.hover.type == HT_UPDATE;
+        f32 base = R.opacity, k = ease_out_cubic(A.up_t), hk = hover_amt(&UPD, hov);
+        R.opacity = base * k;
+        ub.y += floorf((1.f - k) * S(8) + 0.5f);
+        RXf uxf = press_push(&ub, press_amt(&UPD, hov && A.press.type == HT_UPDATE));
+        r_rect(ub.x, ub.y, ub.w, ub.h, color_mix(color_alpha(t->accent, 0.12f), color_alpha(t->accent, 0.2f), hk), S(8));
+        r_rect_ex(ub.x, ub.y, ub.w, ub.h, color_alpha(t->accent, 0.35f), S(8), 1.f, 0);
+        f32 icx = ub.x + S(10) + isz * 0.5f, ucy = ub.y + S(21);
+        text_draw_icon(ready ? 0xE777 : 0xE896, SC(15), icx, ucy, t->accent);
+        f32 utx = ub.x + S(10) + isz + S(12), utw = ub.w - (utx - ub.x) - S(10);
+        WCHAR ut[64], us[64];
+        wfmt(ut, countof(ut), TR("Обновление %s", "Update %s"), UPD.latest);
+        text_draw_fit(FONT_TEXT_SEMIBOLD, SC(13.5f), utx, baseline_for(FONT_TEXT_SEMIBOLD, SC(13.5f), ucy), utw, ut, -1, t->text, false);
+        if (ready) {
+            wcopy(us, countof(us), B.running ? TR("Установится после теста", "Goes in after the test") : TR("Нажмите, чтобы установить", "Click to install"));
+            text_draw_fit(FONT_TEXT, SC(12), utx, baseline_for(FONT_TEXT, SC(12), ub.y + S(42)), utw, us, -1, t->dim, false);
+        } else {
+            f32 p = (f32)UPD.progress / 1000.f, by = ub.y + S(40), bw = utw;
+            wfmt(us, countof(us), TR("Скачиваю… %d%%", "Downloading… %d%%"), (int)(p * 100.f + 0.5f));
+            text_draw_fit(FONT_TEXT, SC(12), utx, baseline_for(FONT_TEXT, SC(12), by - S(2)), utw, us, -1, t->dim, false);
+            r_rect(utx, by + S(8), bw, S(4), color_alpha(t->accent, 0.18f), S(2));
+            if (p > 0.f) r_rect(utx, by + S(8), MAX(S(4), floorf(bw * p + 0.5f)), S(4), t->accent, S(2));
+        }
+        r_xf_pop(uxf);
         R.opacity = base;
     }
 
@@ -1685,6 +1730,7 @@ static bool animate(f32 dt)
     anim |= pr_animate(dt);
     anim |= approach(&A.rb_t, A.rb_n ? 1.f : 0.f, 12.f, dt);
     anim |= approach(&A.rb_hv, A.hover.type == HT_REBOOT ? 1.f : 0.f, 20.f, dt);
+    anim |= approach(&A.up_t, update_shown() ? 1.f : 0.f, 12.f, dt);
     bool toast = time_now() < A.toast_until;
     anim |= spring(&A.toast_t, &A.toast_v, toast ? 1.f : 0.f, toast ? 0.5f : 0.3f, toast ? 0.68f : 1.f, 0.002f, dt) || toast;
     anim |= don_animate(dt);
@@ -1771,6 +1817,10 @@ static Hit hit_test(int mx, int my)
     }
     if (msi_menu_hit(x, y, &h)) return h;
     Box n;
+    if (update_shown()) {
+        update_box(&n);
+        if (in_b(&n, x, y)) return (Hit){ HT_UPDATE, -1 };
+    }
     if (A.rb_n) {
         reboot_box(&n);
         if (in_b(&n, x, y)) return (Hit){ HT_REBOOT, -1 };
@@ -2009,6 +2059,10 @@ static void mouse_up(int mx, int my)
             }
             break;
         case HT_REBOOT: modal_open_mode(MM_REBOOT, 0); break;
+        case HT_UPDATE:
+            // the new version goes in and starts; not in the middle of a test or a change
+            if (upd_state() == UPD_READY && !B.running && !g_task_busy && upd_apply(true)) PostMessageW(A.hwnd, WM_CLOSE, 0, 0);
+            break;
         default:
             msi_click(h);
             gx_click(h);
@@ -2194,7 +2248,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             int t = A.hover.type;
             bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET || t == HT_MOK ||
                         t == HT_MCANCEL || t == HT_DONATE || t == HT_LANG || t == HT_MANUAL || t == HT_PKCELL || t == HT_PKBEST ||
-                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || t == HT_TABPLUS || t == HT_RERUN || (t >= HT_MSITOG && t <= HT_MSIREBOOT && t != HT_MSIDDPANEL && t != HT_MSIDDOUT) || (t >= HT_GFXTOG && t <= HT_REBOOT) || t == HT_GMPAGE || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
+                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || t == HT_TABPLUS || t == HT_RERUN || (t >= HT_MSITOG && t <= HT_MSIREBOOT && t != HT_MSIDDPANEL && t != HT_MSIDDOUT) || (t >= HT_GFXTOG && t <= HT_REBOOT) || t == HT_GMPAGE || (t == HT_UPDATE && upd_state() == UPD_READY) || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
             SetCursor(LoadCursorW(NULL, hand ? (LPCWSTR)IDC_HAND : (LPCWSTR)IDC_ARROW));
             return TRUE;
         }
@@ -2243,6 +2297,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         key_down((UINT)wp);
         return 0;
     case WM_TIMER:
+        if (wp == TIMER_UPDATE) {
+            upd_on_timer();
+            return 0;
+        }
         if (wp == TIMER_PARK) {
             // still while a test runs: the counters would take from the measurement
             if (A.page == PG_PARK && !B.running && !IsIconic(h)) pr_tick();
@@ -2333,6 +2391,14 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             invalidate();
         }
         return 0;
+    case WM_APP_UPDATE:
+        invalidate();
+        return 0;
+    case WM_APP_QUIT:
+        // the setup is putting a new version in: don't start the one downloaded here as well
+        InterlockedExchange(&UPD.state, UPD_IDLE);
+        SendMessageW(h, WM_CLOSE, 0, 0);
+        return 0;
     case WM_CLOSE:
         if (B.running) {
             // Put the GPU back before leaving; the window goes when the test thread is done.
@@ -2343,6 +2409,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         }
         if (g_task_busy) return 0;
         job_drain(5000);
+        // a downloaded update goes in as the app closes
+        upd_apply(false);
         DestroyWindow(h);
         return 0;
     case WM_DESTROY:
@@ -2422,6 +2490,10 @@ static bool app_open(void)
     A.rb_t = A.rb_n ? 1.f : 0.f;
     hw_start(A.hwnd);
     health_start(A.hwnd);
+    upd_init();
+#ifndef MB_DEV_BUILD
+    upd_service_refresh();
+#endif
     A.last_frame = time_now();
     A.dirty = true;
     A.ready = true;
@@ -2429,6 +2501,19 @@ static bool app_open(void)
     ShowWindow(A.hwnd, SW_SHOW);
     SetForegroundWindow(A.hwnd);
     return true;
+}
+
+// --shutdown: the running app closes (a test in progress puts the GPU back first); waits until it is gone.
+static void app_shutdown(void)
+{
+    HWND w = FindWindowW(APP_CLASS, NULL);
+    if (w) PostMessageW(w, WM_APP_QUIT, 0, 0);
+    for (int i = 0; i < 300; i++) {
+        HANDLE m = OpenMutexW(SYNCHRONIZE, FALSE, APP_CLASS);
+        if (!m) return;
+        CloseHandle(m);
+        Sleep(100);
+    }
 }
 
 static int app_loop(void)

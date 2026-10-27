@@ -6,3 +6,4 @@ build/
 *.obj
 *.pdb
 *.ilk
+release.bat

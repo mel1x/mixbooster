@@ -15,7 +15,7 @@ static struct {
     DWORD val[PS__COUNT];
     int drag;                   // the slider held, PS_*; -1 none
     f32 drag_v;
-    f32 tog_park, seg_t;
+    f32 tog_park, seg_t, tog_park_v, seg_v;
     f32 scroll, scroll_target, scroll_v, content_h, sb_t;
     Box plans, plan_row[PK_MAX_PLANS], act_btn[PK_MAX_PLANS], add, set, seg, park_sw, cores;
     Box slider[PS__COUNT];
@@ -153,9 +153,7 @@ static void pr_layout(void)
 
 static void pr_card(const Box *b)
 {
-    const Colors *c = &A.c;
-    r_rect(b->x, b->y, b->w, b->h, c->card, S(10));
-    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
+    draw_card(b);
 }
 
 static void pr_head(const Box *b, u32 glyph, const WCHAR *title, const WCHAR *sub, f32 right, u32 subcol)
@@ -179,7 +177,7 @@ static void draw_hslider(const Box *b, f32 v01, bool hov, bool held)
     r_rect_ex(kx - k * 0.5f, cy - k * 0.5f + S(1), k, k, RGBA(0, 0, 0, t->dark ? 90 : 40), k * 0.5f, 0, S(2));
     r_rect(kx - k * 0.5f, cy - k * 0.5f, k, k, c->knob, k * 0.5f);
     r_rect_ex(kx - k * 0.5f, cy - k * 0.5f, k, k, c->ctl_border, k * 0.5f, 1.f, 0);
-    f32 d = held ? S(10) : hov ? S(14) : S(12);
+    f32 hk = hover_amt(b, hov || held), d = held ? S(10) : S(12) + S(2) * hk;
     r_rect(kx - d * 0.5f, cy - d * 0.5f, d, d, t->accent, d * 0.5f);
 }
 
@@ -194,17 +192,18 @@ static void draw_pr_plans(void)
                      : TR("Выберите схему, чтобы настроить её ниже. «Включить» делает её активной", "Pick a plan to set it up below. Turn on makes it the active one"),
             PR.add.w ? PR.add.x : b->x + b->w - S(20), 0);
     if (PR.add.w)
-        draw_button(&PR.add, TR("Добавить схему MixBoost", "Add the MixBoost plan"), 0xE710, BTN_ACCENT, A.hover.type == HT_PRADD ? 1.f : 0.f,
+        draw_button(&PR.add, TR("Добавить схему MixBoost", "Add the MixBoost plan"), 0xE710, BTN_ACCENT, hover_amt(&PR.add, A.hover.type == HT_PRADD),
                     A.press.type == HT_PRADD && A.hover.type == HT_PRADD, false);
     r_rect(b->x + S(20), b->y + S(PR_HEAD_H) - S(4), b->w - S(40), 1, t->sep, 0);
     for (int i = 0; i < PR.nplan; i++) {
         Box *r = &PR.plan_row[i];
         bool sel = i == PR.sel, act = i == PR.active, hov = A.hover.type == HT_PRPLAN && A.hover.idx == i;
+        f32 hk = hover_amt(r, hov && !sel);
         if (sel) {
             r_rect(r->x, r->y + S(2), r->w, r->h - S(4), c->nav_sel, S(8));
             r_rect(r->x + S(4), r->y + r->h * 0.5f - S(8), S(3), S(16), t->accent, S(1.5f));
-        } else if (hov) {
-            r_rect(r->x, r->y + S(2), r->w, r->h - S(4), c->nav_hover, S(8));
+        } else if (hk > 0) {
+            r_rect(r->x, r->y + S(2), r->w, r->h - S(4), color_alpha(c->nav_hover, hk), S(8));
         }
         f32 cy = r->y + r->h * 0.5f, rx = r->x + S(24), ro = S(18);
         // the radio: filled on the active plan
@@ -225,7 +224,7 @@ static void draw_pr_plans(void)
             r_rect(bx, cy - S(11), bw, S(22), color_alpha(t->accent, 0.18f), S(11));
             text_center(FONT_TEXT_SEMIBOLD, SC(11.5f), bx + bw * 0.5f, cy, lbl, t->accent);
         } else {
-            draw_button(&PR.act_btn[i], TR("Включить", "Turn on"), 0, BTN_NEUTRAL, A.hover.type == HT_PRACT && A.hover.idx == i ? 1.f : 0.f,
+            draw_button(&PR.act_btn[i], TR("Включить", "Turn on"), 0, BTN_NEUTRAL, hover_amt(&PR.act_btn[i], A.hover.type == HT_PRACT && A.hover.idx == i),
                         A.press.type == HT_PRACT && A.hover.type == HT_PRACT && A.hover.idx == i, false);
         }
     }
@@ -274,9 +273,10 @@ static void draw_pr_settings(void)
     // plugged in / on battery: a segmented control like the language switch
     if (PR.seg.w) {
         Box *s = &PR.seg;
-        f32 half = floorf(s->w * 0.5f), in = S(3), px = floorf(s->x + in + (half - in) * PR.seg_t + 0.5f);
+        f32 half = floorf(s->w * 0.5f), in = S(3), st = MIN(fabsf(PR.seg_v) * S(3), S(14));
+        f32 px = floorf(s->x + in + (half - in) * PR.seg_t - st * 0.5f + 0.5f);
         r_rect(s->x, s->y, s->w, s->h, c->ctl, S(8));
-        r_rect(px, s->y + in, half - in, s->h - in * 2, t->dark ? RGBA(255, 255, 255, 30) : RGBA(255, 255, 255, 255), S(6));
+        r_rect(px, s->y + in, half - in + floorf(st + 0.5f), s->h - in * 2, t->dark ? RGBA(255, 255, 255, 30) : RGBA(255, 255, 255, 255), S(6));
         for (int k = 0; k < 2; k++) {
             bool on = k == PR.dc;
             text_center(on ? FONT_TEXT_SEMIBOLD : FONT_TEXT, SC(12.5f), s->x + half * (f32)k + half * 0.5f, s->y + s->h * 0.5f,
@@ -379,8 +379,8 @@ static void draw_park_page(void)
 static bool pr_animate(f32 dt)
 {
     bool anim = false;
-    anim |= approach(&PR.tog_park, pr_parking_on() ? 1.f : 0.f, 20.f, dt);
-    anim |= approach(&PR.seg_t, (f32)PR.dc, 18.f, dt);
+    anim |= spring(&PR.tog_park, &PR.tog_park_v, pr_parking_on() ? 1.f : 0.f, 0.34f, 0.7f, 0.002f, dt);
+    anim |= spring(&PR.seg_t, &PR.seg_v, (f32)PR.dc, 0.4f, 0.72f, 0.002f, dt);
     PR.scroll_target = CLAMP(PR.scroll_target, 0.f, pr_max_scroll());
     anim |= spring_step(&PR.scroll, &PR.scroll_v, PR.scroll_target, 24.f, dt);
     bool sb = A.page == PG_PARK && pr_max_scroll() > 0 && A.mx >= content_x0();

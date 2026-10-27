@@ -26,8 +26,7 @@ static void draw_hw_score(const Box *b)
 {
     const Theme *t = &A.th;
     const Colors *c = &A.c;
-    r_rect(b->x, b->y, b->w, b->h, c->card, S(10));
-    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
+    draw_card(b);
     f32 k = ease_out_cubic(A.score_t), v = (f32)HW.d.score_total * k;
 
     // A 270-degree ring open at the bottom, drawn as short overlapping segments of solid color so the joins don't
@@ -75,25 +74,36 @@ static void draw_hw_score(const Box *b)
         { 0xF211, L"Видеокарта", L"Graphics" }, { 0xEEA1, L"Процессор", L"Processor" },
         { 0xE964, L"Память", L"Memory" },       { 0xEDA2, L"Системный диск", L"System drive" },
     };
-    f32 gap = S(10), cw = floorf((x1 - x - gap) * 0.5f), ch = S(68), gy = b->y + b->h - S(20) - ch * 2 - gap;
+    f32 gap = S(10), cw = floorf((x1 - x - gap) * 0.5f), ch = S(70), gy = b->y + b->h - S(20) - ch * 2 - gap;
     for (int i = 0; i < SC__COUNT; i++) {
         Box tb = { x + (cw + gap) * (f32)(i % 2), gy + (ch + gap) * (f32)(i / 2), cw, ch };
-        r_rect(tb.x, tb.y, tb.w, tb.h, c->ctl, S(8));
-        f32 isz = S(34);
-        draw_icon_tile(tb.x + S(12), tb.y + (tb.h - isz) * 0.5f, isz, parts[i].glyph);
-        f32 tx = tb.x + S(12) + isz + S(12), tr = tb.x + tb.w - S(14), pv2 = (f32)HW.d.score_part[i] * k;
+        // the tiles fill one after another, and light up under the mouse
+        f32 kt = ease_out_cubic(A.score_t * 1.35f - 0.1f * (f32)i), part = (f32)HW.d.score_part[i], pv2 = part * kt;
+        f32 hv = hover_amt(&HW.d.score_part[i], A.page == PG_HW && page_open() && in_b(&tb, (f32)A.mx, (f32)A.my));
+        r_rect(tb.x, tb.y, tb.w, tb.h, color_mix(c->ctl, c->ctl_hover, hv), S(12));
+        r_rect_ex(tb.x, tb.y, tb.w, tb.h, c->ctl_border, S(12), 1.f, 0);
+
+        // the icon on an accent tile, the part and its name next to it
+        f32 pad = S(14), isz = S(32), iy = tb.y + S(12);
+        draw_icon_tile(tb.x + pad, iy, isz, parts[i].glyph);
+        f32 tx = tb.x + pad + isz + S(12), tr = tb.x + tb.w - pad;
+
+        // the score on a pill at the right
         wfmt(num, countof(num), L"%d", (int)(pv2 + 0.5f));
-        f32 nw = text_width(FONT_TEXT_SEMIBOLD, SC(17), num, -1);
-        // the part, its score, and under them what it is: the name cut with an ellipsis when long
-        text_draw_fit(FONT_TEXT, SC(12), tx, baseline_for(FONT_TEXT, SC(12), tb.y + S(18)), tr - tx - nw - S(8), g_lang_ru ? parts[i].ru : parts[i].en,
-                      -1, t->dim, false);
-        text_right(FONT_TEXT_SEMIBOLD, SC(17), tr, tb.y + S(20), num, t->text);
+        f32 nfs = SC(13.5f), pw = MAX(S(40), text_width(FONT_TEXT_SEMIBOLD, nfs, num, -1) + S(20)), ph = S(24), pcy = iy + isz * 0.5f;
+        r_rect(tr - pw, floorf(pcy - ph * 0.5f), pw, ph, color_alpha(t->accent, t->dark ? 0.18f : 0.14f), ph * 0.5f);
+        text_center(FONT_TEXT_SEMIBOLD, nfs, tr - pw * 0.5f, pcy, num, t->text);
+
+        f32 tw = tr - pw - S(10) - tx;
+        text_draw_fit(FONT_TEXT, SC(12), tx, baseline_for(FONT_TEXT, SC(12), iy + S(7)), tw, g_lang_ru ? parts[i].ru : parts[i].en, -1, t->dim, false);
         const WCHAR *nm = HW.d.score_name[i];
-        text_draw_fit(FONT_TEXT_SEMIBOLD, SC(12.5f), tx, baseline_for(FONT_TEXT_SEMIBOLD, SC(12.5f), tb.y + S(37)), tr - tx - nw - S(8),
+        text_draw_fit(FONT_TEXT_SEMIBOLD, SC(13.5f), tx, baseline_for(FONT_TEXT_SEMIBOLD, SC(13.5f), iy + S(25)), tw,
                       nm[0] ? nm : TR("Не определено", "Unknown"), -1, nm[0] ? t->text : t->faint, false);
-        f32 bw = tr - tx, by = tb.y + S(52);
-        r_rect(tx, by, bw, S(5), track, S(2.5f));
-        if (pv2 > 0.5f) r_rect(tx, by, MAX(S(5), floorf(bw * pv2 / 100.f)), S(5), t->accent, S(2.5f));
+
+        // a thin accent bar across the bottom, filled up to the score
+        f32 bx = tb.x + pad, bw = tb.w - pad * 2, by = tb.y + tb.h - S(12), bh = S(4), fw = floorf(bw * pv2 / 100.f + 0.5f);
+        r_rect(bx, by, bw, bh, track, bh * 0.5f);
+        if (fw >= bh) r_rect(bx, by, fw, bh, t->accent, bh * 0.5f);
     }
 }
 
@@ -121,9 +131,7 @@ static void skel(f32 x, f32 y, f32 w, f32 h, f32 rad)
 
 static void skel_frame(const Box *b)
 {
-    const Colors *c = &A.c;
-    r_rect(b->x, b->y, b->w, b->h, c->card, S(10));
-    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
+    draw_card(b);
 }
 
 static void draw_skel_card(const Box *b, int nrows, int seed)
@@ -215,9 +223,7 @@ static f32 hw_max_scroll(void) { return MAX(0.f, A.hw_content_h - hw_view_h()); 
 static void draw_hw_stat(const Box *b, const HwStat *s)
 {
     const Theme *t = &A.th;
-    const Colors *c = &A.c;
-    r_rect(b->x, b->y, b->w, b->h, c->card, S(10));
-    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
+    draw_card(b);
     f32 isz = S(40), cy = b->y + b->h * 0.5f;
     draw_icon_tile(b->x + S(18), floorf(cy - isz * 0.5f), isz, s->glyph);
     f32 tx = b->x + S(18) + isz + S(14), vfs = SC(24), ufs = SC(14);
@@ -229,9 +235,7 @@ static void draw_hw_stat(const Box *b, const HwStat *s)
 static void draw_hw_card(const Box *b, const HwCard *cd)
 {
     const Theme *t = &A.th;
-    const Colors *c = &A.c;
-    r_rect(b->x, b->y, b->w, b->h, c->card, S(10));
-    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
+    draw_card(b);
     f32 pad = S(18), isz = S(42);
     draw_icon_tile(b->x + pad, b->y + pad, isz, cd->glyph);
     f32 tx = b->x + pad + isz + S(14), tmax = b->x + b->w - tx - pad;

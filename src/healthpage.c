@@ -32,9 +32,7 @@ static u32 state_color(u8 s)
 static void draw_hl_hero(const Box *b)
 {
     const Theme *t = &A.th;
-    const Colors *c = &A.c;
-    r_rect(b->x, b->y, b->w, b->h, c->card, S(10));
-    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
+    draw_card(b);
     f32 isz = S(56), cy = b->y + b->h * 0.5f, ix = b->x + S(24);
     u32 col = state_color(HL.d.state);
     r_rect(ix, cy - isz * 0.5f, isz, isz, color_alpha(col, 0.16f), isz * 0.5f);

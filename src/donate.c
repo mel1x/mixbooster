@@ -333,7 +333,7 @@ static bool don_animate(f32 dt)
         return true;
     }
     if (D.t < 1.f) {
-        f32 d = 0.24f;
+        f32 d = 0.42f;
         D.t = d > 0.f ? MIN(1.f, D.t + dt / d) : 1.f;
         anim = true;
     }
@@ -360,7 +360,7 @@ static void draw_donate(void)
 {
     const Theme *t = &A.th;
     const Colors *c = &A.c;
-    f32 e = D.closing ? D.t * D.t : ease_out_quart(D.t);
+    f32 e = D.closing ? D.t * D.t : ease_out_quint(D.t);
     R.opacity = e;
     r_rect(0, 0, (f32)A.W, (f32)A.H, c->overlay, 0);
     f32 pw = S(380), m = S(16);
@@ -372,8 +372,10 @@ static void draw_donate(void)
     D.view_h = ph;
     f32 ms = MAX(0.f, content - ph);
     D.scroll = CLAMP(D.scroll, 0.f, ms);
-    f32 px = floorf(((f32)A.W - pw) * 0.5f), py = floorf(((f32)A.H - ph) * 0.5f + (1.f - e) * S(D.closing ? 8.f : 22.f));
+    f32 px = floorf(((f32)A.W - pw) * 0.5f), py = floorf(((f32)A.H - ph) * 0.5f + (1.f - e) * S(D.closing ? 6.f : 14.f));
     box_set(D.panel, px, py, pw, ph);
+    // the panel grows into place from a little smaller, and shrinks back closing
+    RXf xf = r_xf_push(0.93f + 0.07f * e, px + pw * 0.5f, py + ph * 0.5f, 0, 0);
     r_rect_ex(px, py + S(14), pw, ph, c->shadow, S(16), 0, S(30));
     r_rect(px, py, pw, ph, t->dark ? RGBA(36, 36, 39, 255) : RGBA(252, 252, 253, 255), S(16));
     r_rect_ex(px, py, pw, ph, c->pop_border, S(16), 1.f, 0);
@@ -513,5 +515,6 @@ static void draw_donate(void)
         r_rect(px + pw - S(6) - bw, floorf(py + S(12) + (vh - bar_h) * D.scroll / ms), bw, floorf(bar_h), color_alpha(t->faint, D.sb_t),
                bw * 0.5f);
     }
+    r_xf_pop(xf);
     R.opacity = 1.f;
 }

@@ -1,11 +1,5 @@
 <p align="center">
-  <img src="docs/screens/components.png" alt="MixBooster" width="860">
-</p>
-
-<h1 align="center"><img src="docs/logo.png" alt="" width="34" align="top"> MixBooster</h1>
-
-<p align="center">
-  PC tuning for gaming on Windows 10 and 11.
+  <img src="docs/banner.png" alt="MixBooster - PC tuning for gaming on Windows 10 and 11" width="100%">
 </p>
 
 <p align="center">

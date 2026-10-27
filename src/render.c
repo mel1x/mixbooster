@@ -76,6 +76,36 @@ static bool approach(f32 *x, f32 target, f32 rate, f32 dt)
     return true;
 }
 
+// A spring set the way Apple sets one: response is about the time to settle in seconds, damping 1 settles without
+// overshoot and less bounces a little. eps is the distance from the target that counts as there.
+static bool spring(f32 *x, f32 *v, f32 target, f32 response, f32 damping, f32 eps, f32 dt)
+{
+    if (response <= 0.f || g_reduced_motion) {
+        *x = target;
+        *v = 0;
+        return false;
+    }
+    f32 w = 6.2831853f / response, k = w * w, c = 2.f * damping * w;
+    int n = (int)ceilf(dt * 480.f);
+    f32 h = dt / (f32)MAX(n, 1);
+    for (int i = 0; i < n; i++) {
+        *v += (-k * (*x - target) - c * *v) * h;
+        *x += *v * h;
+    }
+    if (fabsf(*x - target) < eps && fabsf(*v) < eps * 10.f) {
+        *x = target;
+        *v = 0;
+        return false;
+    }
+    return true;
+}
+
+static f32 ease_out_quint(f32 t)
+{
+    t = 1.f - CLAMP(t, 0.f, 1.f);
+    return 1.f - t * t * t * t * t;
+}
+
 static f32 ease_out_cubic(f32 t)
 {
     t = 1.f - CLAMP(t, 0.f, 1.f);
@@ -127,6 +157,8 @@ typedef struct Renderer {
     f32 clip[4];
     f32 scale;
     f32 opacity;
+    f32 xs, xtx, xty;  // what r_xf_push set: every shape is scaled by xs and moved by (xtx, xty)
+    bool xf_scaled;    // something was drawn scaled this frame: text takes the linear sampler
 
     u8 *glyph_cpu;
     int dirty_x0, dirty_y0, dirty_x1, dirty_y1;
@@ -477,6 +509,9 @@ static void r_begin(void)
 {
     R.count = 0;
     R.opacity = 1.f;
+    R.xs = 1.f;
+    R.xtx = R.xty = 0;
+    R.xf_scaled = false;
     r_set_clip(0, 0, (f32)R.t->w, (f32)R.t->h);
 }
 
@@ -495,6 +530,63 @@ static RInst *r_push(void)
     q->cx1 = R.clip[2];
     q->cy1 = R.clip[3];
     return q;
+}
+
+// Scales what is drawn next by s around (cx, cy) and moves it by (dx, dy), inside whatever is already set. Returns
+// the transform to give back to r_xf_pop.
+typedef struct RXf {
+    f32 s, tx, ty;
+} RXf;
+
+static RXf r_xf_push(f32 s, f32 cx, f32 cy, f32 dx, f32 dy)
+{
+    RXf old = { R.xs, R.xtx, R.xty };
+    f32 tx = cx - cx * s + dx, ty = cy - cy * s + dy;
+    R.xtx = tx * R.xs + R.xtx;
+    R.xty = ty * R.xs + R.xty;
+    R.xs *= s;
+    return old;
+}
+
+static void r_xf_pop(RXf old)
+{
+    R.xs = old.s;
+    R.xtx = old.tx;
+    R.xty = old.ty;
+}
+
+static void r_xf_apply(RInst *q)
+{
+    if (R.xs == 1.f && R.xtx == 0 && R.xty == 0) return;
+    f32 s = R.xs;
+    if (q->mode > 2.5f) {
+        // the affine rect: its center moves, its matrix scales
+        f32 cx = (q->x0 + q->x1) * 0.5f, cy = (q->y0 + q->y1) * 0.5f, hw = (q->x1 - q->x0) * 0.5f, hh = (q->y1 - q->y0) * 0.5f;
+        cx = cx * s + R.xtx;
+        cy = cy * s + R.xty;
+        q->x0 = cx - hw;
+        q->x1 = cx + hw;
+        q->y0 = cy - hh;
+        q->y1 = cy + hh;
+        q->u0 *= s;
+        q->v0 *= s;
+        q->u1 *= s;
+        q->v1 *= s;
+    } else {
+        q->x0 = q->x0 * s + R.xtx;
+        q->y0 = q->y0 * s + R.xty;
+        q->x1 = q->x1 * s + R.xtx;
+        q->y1 = q->y1 * s + R.xty;
+        if (q->mode < 0.5f) {
+            q->radius *= s;
+            q->soft *= s;
+        }
+    }
+    q->cx0 = q->cx0 * s + R.xtx;
+    q->cy0 = q->cy0 * s + R.xty;
+    q->cx1 = q->cx1 * s + R.xtx;
+    q->cy1 = q->cy1 * s + R.xty;
+    if (s != 1.f) R.xf_scaled = true;
 }
 
 static u32 r_fade(u32 color)
@@ -518,6 +610,7 @@ static void r_rect_ex(f32 x, f32 y, f32 w, f32 h, u32 color, f32 radius, f32 bor
     q->border = border;
     q->soft = soft;
     q->mode = 0;
+    r_xf_apply(q);
 }
 
 static void r_rect(f32 x, f32 y, f32 w, f32 h, u32 color, f32 radius) { r_rect_ex(x, y, w, h, color, radius, 0, 0); }
@@ -542,6 +635,7 @@ static void r_rect_affine(f32 cx, f32 cy, f32 w, f32 h, const f32 m[4], u32 colo
     q->border = 0;
     q->soft = 0;
     q->mode = 3;
+    r_xf_apply(q);
 }
 
 // A rounded rect centered at (cx, cy), squashed horizontally by sx (a tumble in depth) and then rotated by angle.
@@ -568,6 +662,7 @@ static void r_glyph(f32 x, f32 y, f32 w, f32 h, f32 u0, f32 v0, f32 u1, f32 v1, 
     q->color = color;
     q->radius = q->border = q->soft = 0;
     q->mode = 1;
+    r_xf_apply(q);
 }
 
 static void r_icon(f32 x, f32 y, f32 w, f32 h, f32 u0, f32 v0, f32 u1, f32 v1, f32 opacity)
@@ -585,6 +680,7 @@ static void r_icon(f32 x, f32 y, f32 w, f32 h, f32 u0, f32 v0, f32 u1, f32 v1, f
     q->color = RGBA(255, 255, 255, (u32)(CLAMP(opacity * R.opacity, 0.f, 1.f) * 255.f + 0.5f));
     q->radius = q->border = q->soft = 0;
     q->mode = 2;
+    r_xf_apply(q);
 }
 
 static void r_glyph_dirty(int x, int y, int w, int h)
@@ -649,7 +745,7 @@ static bool r_end_and_present(void)
     ID3D11DeviceContext_PSSetConstantBuffers(R.ctx, 0, 1, &R.cbuf);
     ID3D11ShaderResourceView *srvs[2] = { R.glyph_srv, R.icon_srv };
     ID3D11DeviceContext_PSSetShaderResources(R.ctx, 0, 2, srvs);
-    ID3D11SamplerState *samps[2] = { R.scale != 1.0f ? R.samp_linear : R.samp_point, R.samp_linear };
+    ID3D11SamplerState *samps[2] = { R.scale != 1.0f || R.xf_scaled ? R.samp_linear : R.samp_point, R.samp_linear };
     ID3D11DeviceContext_PSSetSamplers(R.ctx, 0, 2, samps);
 
     for (u32 done = 0; done < R.count;) {

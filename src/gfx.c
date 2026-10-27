@@ -28,7 +28,7 @@ static struct {
     bool ready;
     bool on[GX__COUNT];
     bool hags_sup, hags_run, hags_def;
-    f32 tog[GX__COUNT];
+    f32 tog[GX__COUNT], togv[GX__COUNT];
     int seq[GX__COUNT], pend;  // clicks per switch, and jobs not done: Windows is read again once they are
     f32 scroll, scroll_target, scroll_v, content_h, sb_t;
     Box card, rows[GX__COUNT], sw[GX__COUNT];
@@ -326,14 +326,12 @@ static void draw_set_row(const Box *r, f32 right, u32 glyph, const WCHAR *title,
 static void draw_gfx_page(void)
 {
     const Theme *t = &A.th;
-    const Colors *c = &A.c;
     if (!GX.ready && !GX.pend) gx_read();
     gx_layout();
     f32 top = S(HW_TOP) - S(6);
     r_set_clip(0, top, (f32)A.W, (f32)A.H);
     Box *b = &GX.card;
-    r_rect(b->x, b->y, b->w, b->h, c->card, S(10));
-    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
+    draw_card(b);
     for (int i = 0; i < GX__COUNT; i++) {
         Box *r = &GX.rows[i];
         WCHAR note[160] = L"";
@@ -379,7 +377,7 @@ static void draw_gfx_page(void)
 static bool gx_animate(f32 dt)
 {
     bool anim = false;
-    for (int i = 0; i < GX__COUNT; i++) anim |= approach(&GX.tog[i], GX.on[i] ? 1.f : 0.f, 20.f, dt);
+    for (int i = 0; i < GX__COUNT; i++) anim |= spring(&GX.tog[i], &GX.togv[i], GX.on[i] ? 1.f : 0.f, 0.34f, 0.7f, 0.002f, dt);
     GX.scroll_target = CLAMP(GX.scroll_target, 0.f, gx_max_scroll());
     anim |= spring_step(&GX.scroll, &GX.scroll_v, GX.scroll_target, 24.f, dt);
     bool sb = A.page == PG_GFX && gx_max_scroll() > 0 && A.mx >= content_x0();

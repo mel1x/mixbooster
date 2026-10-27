@@ -12,7 +12,7 @@ static struct {
     Game list[GM_MAX];
     int n;
     int lasso;             // LS_*
-    f32 tog[GM_MAX];
+    f32 tog[GM_MAX], togv[GM_MAX];
     int seq[GM_MAX], pend;  // clicks per game, and jobs not done: the list is read again only once they are
     bool rescan;            // a game was added or removed: read the list when the jobs are done
     int ico[GM_MAX];       // the icon's size in the atlas: 0 not read yet, -1 none
@@ -126,6 +126,7 @@ static void gm_remove(int i)
     // gone from the list at once; the list is read again when the job is done
     memmove(&GM.list[i], &GM.list[i + 1], sizeof(Game) * (size_t)(GM.n - i - 1));
     memmove(&GM.tog[i], &GM.tog[i + 1], sizeof(f32) * (size_t)(GM.n - i - 1));
+    memmove(&GM.togv[i], &GM.togv[i + 1], sizeof(f32) * (size_t)(GM.n - i - 1));
     memmove(&GM.seq[i], &GM.seq[i + 1], sizeof(int) * (size_t)(GM.n - i - 1));
     GM.n--;
     // an icon's atlas cell goes by its index: the ones that moved up are read again
@@ -295,9 +296,7 @@ static void gm_layout(void)
 
 static void gm_card(const Box *b)
 {
-    const Colors *c = &A.c;
-    r_rect(b->x, b->y, b->w, b->h, c->card, S(10));
-    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
+    draw_card(b);
 }
 
 // A capsule with a small glyph and a label; returns its width.
@@ -358,7 +357,7 @@ static void draw_gm_list(void)
         r_rect(px, cy - S(11), pw, S(22), c->ctl, S(11));
         text_center(FONT_TEXT_SEMIBOLD, SC(11.5f), px + pw * 0.5f, cy, cnt, t->dim);
     }
-    draw_button(&GM.add, TR("Добавить игру", "Add a game"), 0xE710, BTN_ACCENT, A.hover.type == HT_GMADD ? 1.f : 0.f,
+    draw_button(&GM.add, TR("Добавить игру", "Add a game"), 0xE710, BTN_ACCENT, hover_amt(&GM.add, A.hover.type == HT_GMADD),
                 A.press.type == HT_GMADD && A.hover.type == HT_GMADD, false);
 
     Box *b = &GM.list_card;
@@ -376,9 +375,10 @@ static void draw_gm_list(void)
         const Game *g = &GM.list[i];
         Box *r = &GM.rows[i];
         bool hov = (A.hover.type == HT_GMTOG || A.hover.type == HT_GMDEL) && A.hover.idx == i;
-        if (hov) r_rect(r->x, r->y + S(2), r->w, r->h - S(4), c->nav_hover, S(8));
-        else if (i + 1 < GM.n && !(A.hover.type == HT_GMTOG && A.hover.idx == i + 1))
-            r_rect(r->x + S(16), r->y + r->h - 1, r->w - S(32), 1, color_alpha(t->sep, 0.7f), 0);
+        f32 rh = hover_amt(r, hov), nh = i + 1 < GM.n ? hover_amt(&GM.rows[i + 1], (A.hover.type == HT_GMTOG || A.hover.type == HT_GMDEL) && A.hover.idx == i + 1) : 0.f;
+        if (rh > 0) r_rect(r->x, r->y + S(2), r->w, r->h - S(4), color_alpha(c->nav_hover, rh), S(8));
+        // the line under a row gives way to the hover of either row next to it
+        if (i + 1 < GM.n) r_rect(r->x + S(16), r->y + r->h - 1, r->w - S(32), 1, color_alpha(t->sep, 0.7f * (1.f - MAX(rh, nh))), 0);
         f32 ry = r->y + r->h * 0.5f, ix = r->x + S(16), nx = ix + isz + S(14);
         f32 right = (g->custom ? GM.del[i].x : GM.sw[i].x) - S(16);
         gm_draw_icon(i, ix, ry - isz * 0.5f, isz);
@@ -418,8 +418,11 @@ static void draw_gm_list(void)
         if (g->custom) {
             Box *d = &GM.del[i];
             bool dh = A.hover.type == HT_GMDEL && A.hover.idx == i;
-            if (dh) r_rect(d->x, d->y, d->w, d->h, A.press.type == HT_GMDEL ? c->ctl_hover : c->ctl, S(6));
-            text_draw_icon(0xE74D, SC(13), d->x + d->w * 0.5f, d->y + d->h * 0.5f, dh ? t->danger : t->faint);
+            f32 dk = hover_amt(d, dh);
+            if (dk > 0) r_rect(d->x, d->y, d->w, d->h, color_alpha(color_alpha(t->danger, 0.14f), dk), S(6));
+            RXf dxf = press_push(d, press_amt(d, dh && A.press.type == HT_GMDEL));
+            text_draw_icon(0xE74D, SC(13), d->x + d->w * 0.5f, d->y + d->h * 0.5f, color_mix(t->faint, t->danger, dk));
+            r_xf_pop(dxf);
         }
         draw_switch(&GM.sw[i], GM.tog[i], true, A.hover.type == HT_GMTOG && A.hover.idx == i);
     }
@@ -450,7 +453,7 @@ static void draw_game_page(void)
 static bool gm_animate(f32 dt)
 {
     bool anim = false;
-    for (int i = 0; i < GM.n; i++) anim |= approach(&GM.tog[i], GM.list[i].on ? 1.f : 0.f, 20.f, dt);
+    for (int i = 0; i < GM.n; i++) anim |= spring(&GM.tog[i], &GM.togv[i], GM.list[i].on ? 1.f : 0.f, 0.34f, 0.7f, 0.002f, dt);
     GM.scroll_target = CLAMP(GM.scroll_target, 0.f, gm_max_scroll());
     anim |= spring_step(&GM.scroll, &GM.scroll_v, GM.scroll_target, 24.f, dt);
     bool sb = A.page == PG_GAMES && gm_max_scroll() > 0 && A.mx >= content_x0();

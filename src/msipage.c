@@ -4,6 +4,7 @@
 static struct {
     f32 scroll, scroll_target, scroll_v, content_h, sb_t;
     f32 tog[MSI_MAX];          // the switches' knobs, 0 off .. 1 on
+    f32 togv[MSI_MAX];
     f32 row_y[MSI_MAX];        // each device's row, in content coordinates
     f32 grp_y[MG_SYSTEM + 1];  // each group's header, -1 when the group is empty
     int dd;                    // the device whose priority menu is open, -1 none
@@ -166,27 +167,34 @@ static void msi_layout(void)
 static void draw_switch(const Box *hit, f32 on, bool enabled, bool hov)
 {
     const Theme *t = &A.th;
-    const Colors *c = &A.c;
-    f32 w = S(40), h = S(20), x = hit->x + S(6), y = floorf(hit->y + (hit->h - h) * 0.5f);
+    // An iOS-style switch: a filled track, a white knob with a soft shadow that rides inside it.
+    f32 w = S(44), h = S(24), x = hit->x + S(4), y = floorf(hit->y + (hit->h - h) * 0.5f), in = S(2), d = h - in * 2;
+    u32 off_track = t->dark ? RGBA(255, 255, 255, 38) : RGBA(0, 0, 0, 28);
     if (!enabled) {
-        r_rect_ex(x, y, w, h, color_alpha(t->faint, 0.6f), h * 0.5f, 1.f, 0);
-        f32 d = S(10);
-        r_rect(x + S(5), y + (h - d) * 0.5f, d, d, color_alpha(t->faint, 0.6f), d * 0.5f);
+        r_rect(x, y, w, h, color_alpha(off_track, 0.5f), h * 0.5f);
+        r_rect(x + in, y + in, d, d, t->dark ? RGBA(255, 255, 255, 50) : RGBA(255, 255, 255, 170), d * 0.5f);
         return;
     }
-    r_rect(x, y, w, h, color_mix(hov ? c->ctl_hover : c->ctl, t->accent, on), h * 0.5f);
-    if (on < 0.99f) r_rect_ex(x, y, w, h, color_alpha(t->dim, 1.f - on), h * 0.5f, 1.f, 0);
-    f32 d = hov ? S(14) : S(12), kx = x + S(10) + (w - S(20)) * on;
-    r_rect(kx - d * 0.5f, y + h * 0.5f - d * 0.5f, d, d, color_mix(t->dim, t->on_accent, on), d * 0.5f);
+    // on runs a little past 0..1 while the knob's spring settles
+    f32 o = CLAMP(on, 0.f, 1.f), hv = hover_amt(hit, hov);
+    // the mouse over it: the track a shade brighter
+    u32 track = color_mix(off_track, t->accent, o);
+    u32 lift = t->dark ? RGBA(255, 255, 255, 255) : RGBA(0, 0, 0, 255);
+    r_rect(x, y, w, h, color_mix(track, color_alpha(lift, (f32)(track >> 24) / 255.f), (t->dark ? 0.1f : 0.06f) * hv), h * 0.5f);
+    // held, the knob stretches toward the side it will go to, as on iOS
+    bool held = hov && A.press.type != HT_NONE && A.press.type == A.hover.type && A.press.idx == A.hover.idx;
+    f32 sw = S(7) * CLAMP(press_amt(hit, held), 0.f, 1.2f);
+    f32 kx = x + in + (w - in * 2 - d) * on - sw * o, ky = y + in;
+    r_rect_ex(kx, ky + S(1), d + sw, d, RGBA(0, 0, 0, t->dark ? 90 : 55), d * 0.5f, 0, S(2));
+    r_rect(kx, ky, d + sw, d, RGBA(255, 255, 255, 255), d * 0.5f);
+    if (!t->dark) r_rect_ex(kx, ky, d + sw, d, RGBA(0, 0, 0, 14), d * 0.5f, 1.f, 0);
 }
 
 static void draw_msi_card(void)
 {
     const Theme *t = &A.th;
-    const Colors *c = &A.c;
     Box *b = &MP.card;
-    r_rect(b->x, b->y, b->w, b->h, c->card, S(10));
-    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
+    draw_card(b);
     int dirty = msi_dirty_count(), managed = msi_managed_count();
     bool busy = g_task_busy != 0, reboot = !dirty && msi_reboot_due();
     u32 icon = dirty ? 0xE70F : reboot ? 0xE777 : 0xE9E9, col = reboot ? t->warn : t->accent;
@@ -246,8 +254,7 @@ static void draw_msi_table(void)
     const Theme *t = &A.th;
     const Colors *c = &A.c;
     Box *b = &MP.table;
-    r_rect(b->x, b->y, b->w, b->h, c->card, S(10));
-    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
+    draw_card(b);
     MsiCols k = msi_cols();
     f32 hy = b->y + S(21), hfs = SC(12.5f);
     text_draw(FONT_TEXT_SEMIBOLD, hfs, k.name, baseline_for(FONT_TEXT, hfs, hy), TR("Устройство", "Device"), -1, t->dim);
@@ -275,7 +282,8 @@ static void draw_msi_table(void)
         f32 y = off + MP.row_y[i], cy = y + S(MSI_ROW_H) * 0.5f;
         if (y + S(MSI_ROW_H) < MP.rows.y || y > MP.rows.y + MP.rows.h) continue;
         bool row_hov = !menu && A.my >= (int)y && A.my < (int)(y + S(MSI_ROW_H)) && in_b(&MP.rows, (f32)A.mx, (f32)A.my);
-        if (row_hov) r_rect(b->x + S(6), y + S(2), b->w - S(12), S(MSI_ROW_H) - S(4), c->nav_hover, S(6));
+        f32 rk = hover_amt(&MS.d[i], row_hov);
+        if (rk > 0) r_rect(b->x + S(6), y + S(2), b->w - S(12), S(MSI_ROW_H) - S(4), color_alpha(c->nav_hover, rk), S(6));
         bool dirty = msi_dirty(m);
         // the name, with a dot while edited, and the PCI id under it
         f32 nx = k.name;
@@ -346,7 +354,7 @@ static void draw_msi_table(void)
         // the priority: a drop-down button
         Box *pb = &MP.prio_box[i];
         bool phov = A.hover.type == HT_MSIPRIO && A.hover.idx == i, open = MP.dd == i;
-        r_rect(pb->x, pb->y, pb->w, pb->h, phov || open ? c->ctl_hover : c->ctl, S(6));
+        r_rect(pb->x, pb->y, pb->w, pb->h, color_mix(c->ctl, c->ctl_hover, hover_amt(pb, phov || open)), S(6));
         r_rect_ex(pb->x, pb->y, pb->w, pb->h, c->ctl_border, S(6), 1.f, 0);
         int pv = m->new_prio;
         text_draw_fit(FONT_TEXT, SC(13), pb->x + S(12), baseline_for(FONT_TEXT, SC(13), cy), pb->w - S(40), prio_name(pv), -1, pv > 0 ? t->text : t->dim,
@@ -369,9 +377,12 @@ static void draw_msi_menu(void)
     if (MP.dd < 0 || MP.dd >= MS.n) return;
     const Theme *t = &A.th;
     const Colors *c = &A.c;
-    f32 base = R.opacity, k = ease_out_cubic(MP.dd_t);
-    R.opacity = base * k;
+    f32 base = R.opacity, k = ease_out_quint(MP.dd_t);
+    R.opacity = base * CLAMP(k * 1.4f, 0.f, 1.f);
     Box *b = &MP.dd_box;
+    // the menu unfolds from the button it belongs to
+    f32 ay = MP.dd_box.y < MP.prio_box[MP.dd].y ? b->y + b->h : b->y;
+    RXf xf = r_xf_push(0.94f + 0.06f * k, b->x + b->w * 0.5f, ay, 0, 0);
     r_rect_ex(b->x, b->y + S(4), b->w, b->h, c->shadow, S(8), 0, S(16));
     r_rect(b->x, b->y, b->w, b->h, t->dark ? RGBA(44, 44, 47, 255) : RGBA(251, 251, 252, 255), S(8));
     r_rect_ex(b->x, b->y, b->w, b->h, c->pop_border, S(8), 1.f, 0);
@@ -379,11 +390,13 @@ static void draw_msi_menu(void)
     for (int i = 0; i < 4; i++) {
         Box *it = &MP.dd_item[i];
         bool sel = k_prio_vals[i] == cur || (i == 0 && cur <= 0), hov = A.hover.type == HT_MSIDDITEM && A.hover.idx == i;
-        if (hov || sel) r_rect(it->x, it->y, it->w, it->h, hov ? c->ctl_hover : c->nav_hover, S(5));
+        f32 ik = hover_amt(it, hov);
+        if (ik > 0 || sel) r_rect(it->x, it->y, it->w, it->h, color_mix(sel ? c->nav_hover : color_alpha(c->ctl_hover, 0.f), c->ctl_hover, ik), S(5));
         if (sel) r_rect(it->x, it->y + it->h * 0.5f - S(8), S(3), S(16), t->accent, S(1.5f));
         f32 cy = it->y + it->h * 0.5f;
         text_draw(FONT_TEXT, SC(13), it->x + S(14), baseline_for(FONT_TEXT, SC(13), cy), prio_name(k_prio_vals[i]), -1, t->text);
     }
+    r_xf_pop(xf);
     R.opacity = base;
 }
 
@@ -399,8 +412,8 @@ static void draw_msi_page(void)
 static bool msi_animate(f32 dt)
 {
     bool anim = false;
-    for (int i = 0; i < MS.n; i++) anim |= approach(&MP.tog[i], msi_shown_on(&MS.d[i]) ? 1.f : 0.f, 20.f, dt);
-    anim |= approach(&MP.dd_t, MP.dd >= 0 ? 1.f : 0.f, 22.f, dt);
+    for (int i = 0; i < MS.n; i++) anim |= spring(&MP.tog[i], &MP.togv[i], msi_shown_on(&MS.d[i]) ? 1.f : 0.f, 0.34f, 0.7f, 0.002f, dt);
+    anim |= approach(&MP.dd_t, MP.dd >= 0 ? 1.f : 0.f, 18.f, dt);
     MP.scroll_target = CLAMP(MP.scroll_target, 0.f, msi_max_scroll());
     anim |= spring_step(&MP.scroll, &MP.scroll_v, MP.scroll_target, 24.f, dt);
     bool sb = A.page == PG_MSI && msi_max_scroll() > 0 && !A.modal && in_b(&MP.table, (f32)A.mx, (f32)A.my);

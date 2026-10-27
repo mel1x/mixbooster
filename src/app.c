@@ -160,7 +160,13 @@ static struct {
     f32 rb_t, rb_hv;
     WCHAR toast[200];         // a switch's change that didn't go through, at the bottom for a few seconds
     f64 toast_until;
-    f32 toast_t;
+    f32 toast_t, toast_v;
+    f32 modal_v, picker_v, lang_v, pick_v;
+    f32 launch_t;             // 0..1 over the first moments: the sidebar comes in item by item
+    const void *prs_key;      // the control that sinks in under the mouse, and how far: see press_amt
+    const void *prs_seen;
+    f32 prs_t, prs_v;
+    bool prs_held;
 
     // layout, rebuilt every frame
     Box card, slider, start, pick_box[2], bind, reset, strip, body, rows;
@@ -180,6 +186,67 @@ static f32 SC(f32 v) { return v * A.s; }
 static bool in_b(const Box *b, f32 x, f32 y) { return x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h; }
 
 static void invalidate(void) { A.dirty = true; }
+
+// A control held down sinks in a little and springs back when let go. Its drawing calls this with any pointer that
+// stays the same for it between frames (its Box) and whether it is held now; the answer is 0..1 (a little past
+// either end while it bounces).
+static f32 press_amt(const void *key, bool down)
+{
+    if (down) A.prs_seen = key;
+    return key == A.prs_key ? A.prs_t : 0.f;
+}
+
+// Hover fades for controls that keep no state of their own: the drawing asks with a pointer that stays the same for
+// the control between frames and whether the mouse is on it now, and gets 0..1 back, eased in and out. A control
+// not drawn for a frame fades out; when the slots run out a control just switches.
+typedef struct HoverFade {
+    const void *key;
+    f32 t;
+    bool want, used;
+} HoverFade;
+static HoverFade g_hf[96];
+static bool g_hf_changed;  // a control's hover changed in this frame's drawing: one more frame starts its fade
+
+static f32 hover_amt(const void *key, bool on)
+{
+    HoverFade *free_slot = NULL;
+    for (int i = 0; i < countof(g_hf); i++) {
+        HoverFade *e = &g_hf[i];
+        if (e->key == key) {
+            e->want |= on;
+            if (on != e->used) g_hf_changed = true;
+            return e->t;
+        }
+        if (!e->key && !free_slot) free_slot = e;
+    }
+    if (!on) return 0.f;
+    if (!free_slot) return 1.f;
+    *free_slot = (HoverFade){ key, 0.f, true, false };
+    g_hf_changed = true;
+    return 0.f;
+}
+
+static bool hover_animate(f32 dt)
+{
+    bool anim = false;
+    for (int i = 0; i < countof(g_hf); i++) {
+        HoverFade *e = &g_hf[i];
+        if (!e->key) continue;
+        // what the last frame drew wants now; a control that stops wanting it shows up as changed below
+        if (e->used && !e->want) anim = true;
+        e->used = e->want;
+        e->want = false;
+        anim |= approach(&e->t, e->used ? 1.f : 0.f, e->used ? 16.f : 11.f, dt);
+        if (!e->used && !e->t) e->key = NULL;
+    }
+    return anim;
+}
+
+// Whether nothing covers the page, so the mouse over it can light things up.
+static bool page_open(void);
+
+// Scales a control around its center by how far it is pressed in.
+static RXf press_push(const Box *b, f32 k) { return r_xf_push(1.f - 0.035f * k, b->x + b->w * 0.5f, b->y + b->h * 0.5f, 0, 0); }
 
 // --- theme ---------------------------------------------------------------------------------------------------------
 
@@ -330,14 +397,41 @@ static void draw_button(const Box *b, const WCHAR *label, u32 glyph, int style, 
         bg = color_mix(c->ctl, c->ctl_hover, down ? 1.f : hov);
         fg = t->text;
     }
-    r_rect(b->x, b->y, b->w, b->h, bg, S(6));
-    if (style == BTN_NEUTRAL || disabled) r_rect_ex(b->x, b->y, b->w, b->h, c->ctl_border, S(6), 1.f, 0);
+    RXf xf = press_push(b, disabled ? 0.f : press_amt(b, down));
+    r_rect(b->x, b->y, b->w, b->h, bg, S(8));
+    if (style == BTN_NEUTRAL || disabled) r_rect_ex(b->x, b->y, b->w, b->h, c->ctl_border, S(8), 1.f, 0);
+    else r_rect_ex(b->x, b->y, b->w, b->h, RGBA(255, 255, 255, t->dark ? 40 : 34), S(8), 1.f, 0);
     f32 fs = SC(13.5f), mid = b->y + b->h * 0.5f;
     f32 lw = text_width(FONT_TEXT, fs, label, -1), gw = glyph ? S(14) + S(8) : 0;
     f32 x = floorf(b->x + (b->w - lw - gw) * 0.5f + 0.5f);
     // the solid play triangle is black on the accent
     if (glyph) text_draw_icon(glyph, SC(13), x + S(7), mid, glyph == GLYPH_PLAY && !disabled ? RGBA(0, 0, 0, 255) : fg);
     text_draw(FONT_TEXT, fs, x + gw, baseline_for(FONT_TEXT, fs, mid), label, -1, fg);
+    r_xf_pop(xf);
+}
+
+// A dialog over the page: the page dims, and the panel grows from a little smaller than it is with a spring (k
+// past 1 is the overshoot) while it fades in. Draw the panel after this and give the result to r_xf_pop.
+static RXf popup_push(const Box *p, f32 k)
+{
+    const Colors *c = &A.c;
+    f32 ko = CLAMP(k, 0.f, 1.f);
+    R.opacity = ko;
+    r_rect(0, 0, (f32)A.W, (f32)A.H, c->overlay, 0);
+    R.opacity = CLAMP(k * 1.8f, 0.f, 1.f);
+    RXf xf = r_xf_push(0.9f + 0.1f * k, p->x + p->w * 0.5f, p->y + p->h * 0.5f, 0, (1.f - k) * S(16));
+    r_rect_ex(p->x, p->y + S(16), p->w, p->h, c->shadow, S(14), 0, S(36));
+    return xf;
+}
+
+// A card: a soft shadow under it on the light theme, the fill and a hairline edge.
+static void draw_card(const Box *b)
+{
+    const Theme *t = &A.th;
+    const Colors *c = &A.c;
+    if (!t->dark) r_rect_ex(b->x, b->y + S(2), b->w, b->h, RGBA(0, 0, 0, 12), S(12), 0, S(6));
+    r_rect(b->x, b->y, b->w, b->h, c->card, S(12));
+    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(12), 1.f, 0);
 }
 
 // The logo, as in tools/make-icon.py: a chip with one core lit, on a dark tile like MixLauncher's and MixWidgets'.
@@ -459,37 +553,65 @@ static f32 max_scroll(void) { return MAX(0.f, A.content_h - A.rows.h); }
 
 // --- drawing -------------------------------------------------------------------------------------------------------
 
+// The sidebar's items come in one after another when the window opens: item i's share, 0..1.
+static f32 launch_k(int i) { return ease_out_quint((A.launch_t - 0.06f - 0.035f * (f32)i) / 0.55f); }
+
+// Fades and slides an item of the sidebar in by launch_k; give the result back to launch_pop.
+static RXf launch_push(int i, f32 *base)
+{
+    f32 k = launch_k(i);
+    *base = R.opacity;
+    R.opacity = *base * k;
+    return r_xf_push(1.f, 0, 0, -(1.f - k) * S(12), 0);
+}
+
+static void launch_pop(RXf xf, f32 base)
+{
+    r_xf_pop(xf);
+    R.opacity = base;
+}
+
 static void draw_sidebar(void)
 {
     const Theme *t = &A.th;
     const Colors *c = &A.c;
-    f32 x = sb_x(), y = sb_x(), w = sb_w(), h = (f32)A.H - sb_x() * 2;
+    f32 x = sb_x(), y = sb_x(), w = sb_w(), h = (f32)A.H - sb_x() * 2, lbase;
     r_rect(x, y, w, h, c->panel, S(12));
     r_rect_ex(x, y, w, h, c->panel_border, S(12), 1.f, 0);
 
+    RXf lxf = launch_push(0, &lbase);
     f32 tile = S(36), tx = x + S(16), ty = y + S(18);
     draw_logo(tx, ty, tile);
     f32 nx = tx + tile + S(12);
     text_draw_fit(FONT_TEXT_SEMIBOLD, SC(15), nx, floorf(ty + S(16)), x + w - nx - S(10), L"MixBooster", -1, t->text, false);
     text_draw_fit(FONT_TEXT, SC(12.5f), nx, floorf(ty + S(33)), x + w - nx - S(10), TR("Оптимизация ПК", "PC tuning"), -1, t->dim, false);
+    launch_pop(lxf, lbase);
 
     Box n;
     nav_box(A.page, &n);
     // the selection slides between the pages; its accent bar stretches a little while it moves
+    lxf = launch_push(1 + A.page, &lbase);
     f32 py = floorf(A.nav_y + 0.5f);
     r_rect(n.x, py, n.w, n.h, c->nav_sel, S(8));
     r_rect_ex(n.x, py, n.w, n.h, c->nav_sel_border, S(8), 1.f, 0);
     f32 bh = floorf(MIN(S(16) + fabsf(A.nav_v) * 0.02f, n.h - S(8)) + 0.5f);
     r_rect(n.x + S(4), floorf(py + (n.h - bh) * 0.5f + 0.5f), S(3), bh, t->accent, S(1.5f));
+    launch_pop(lxf, lbase);
     f32 isz = S(20), fs = SC(14);
     for (int i = 0; i < PG__COUNT; i++) {
         nav_box(i, &n);
         bool sel = i == A.page;
+        lxf = launch_push(1 + i, &lbase);
         if (!sel && A.nav_hov[i] > 0) r_rect(n.x, n.y, n.w, n.h, color_alpha(c->nav_hover, A.nav_hov[i]), S(8));
+        // the item sinks in a little under the mouse
+        bool down = A.press.type == HT_NAV && A.press.idx == i && A.hover.type == HT_NAV && A.hover.idx == i;
+        RXf pxf = press_push(&n, press_amt(&A.nav_hov[i], down));
         f32 cy = n.y + n.h * 0.5f, ix = n.x + S(10);
-        text_draw_icon(k_pages[i].glyph, SC(15), ix + isz * 0.5f, cy, sel ? t->text : color_mix(t->faint, t->dim, A.nav_hov[i]));
+        text_draw_icon(k_pages[i].glyph, SC(15), ix + isz * 0.5f, cy, sel ? t->accent : color_mix(t->faint, t->dim, A.nav_hov[i]));
         text_draw_fit(sel ? FONT_TEXT_SEMIBOLD : FONT_TEXT, fs, ix + isz + S(12), baseline_for(FONT_TEXT, fs, cy), n.x + n.w - ix - isz - S(18),
                       g_lang_ru ? k_pages[i].ru : k_pages[i].en, -1, sel ? t->text : color_mix(t->dim, t->text, A.nav_hov[i]), false);
+        r_xf_pop(pxf);
+        launch_pop(lxf, lbase);
     }
 
     if (A.rb_t > 0.003f) {
@@ -509,27 +631,35 @@ static void draw_sidebar(void)
         R.opacity = base;
     }
 
+    lxf = launch_push(PG__COUNT + 2, &lbase);
     Box d;
     donate_box(&d);
     f32 hv = A.hv[HV_DONATE], dcy = d.y + d.h * 0.5f;
+    RXf dxf = press_push(&d, press_amt(&A.hv[HV_DONATE], A.press.type == HT_DONATE && A.hover.type == HT_DONATE));
     if (hv > 0) r_rect(d.x, d.y, d.w, d.h, color_alpha(c->nav_hover, hv), S(8));
     text_draw_icon(0xEB51, SC(15), d.x + S(10) + isz * 0.5f, dcy, color_mix(t->faint, t->dim, hv));
     text_draw_fit(FONT_TEXT, fs, d.x + S(10) + isz + S(12), baseline_for(FONT_TEXT, fs, dcy), d.w - isz - S(32), TR("Поддержать автора", "Support the author"),
                   -1, color_mix(t->dim, t->text, hv), false);
+    r_xf_pop(dxf);
+    launch_pop(lxf, lbase);
+    lxf = launch_push(PG__COUNT + 3, &lbase);
     // the language: a Windows 11 segmented control, both names in view, the chosen one on a sliding plate
     Box lb;
     lang_box(&lb);
     f32 lcy = lb.y + lb.h * 0.5f, half = floorf(lb.w * 0.5f), in = S(3);
     r_rect(lb.x, lb.y, lb.w, lb.h, c->ctl, S(8));
-    f32 px = floorf(lb.x + in + (half - in) * A.lang_t + 0.5f), pw = half - in, ph = lb.h - in * 2;
+    // the plate stretches a little while it slides, the way iOS moves its selections
+    f32 stretch = MIN(fabsf(A.lang_v) * S(3), S(14));
+    f32 px = floorf(lb.x + in + (half - in) * A.lang_t - stretch * 0.5f + 0.5f), pw = half - in + floorf(stretch + 0.5f), ph = lb.h - in * 2;
     if (!t->dark) r_rect_ex(px, lb.y + in + S(1), pw, ph, RGBA(0, 0, 0, 22), S(6), 0, S(2));
     r_rect(px, lb.y + in, pw, ph, t->dark ? RGBA(255, 255, 255, 30) : RGBA(255, 255, 255, 255), S(6));
     r_rect_ex(px, lb.y + in, pw, ph, t->dark ? RGBA(255, 255, 255, 14) : RGBA(0, 0, 0, 16), S(6), 1.f, 0);
     for (int k = 0; k < 2; k++) {
         bool sel = (k == 1) != g_lang_ru, hov = A.hover.type == HT_LANG && A.hover.idx == k && !sel;
-        u32 col = sel ? t->text : hov ? color_mix(t->dim, t->text, 0.6f) : t->dim;
+        u32 col = sel ? t->text : color_mix(t->dim, t->text, 0.6f * hover_amt(k ? (const void *)&A.lang_v : &A.lang_t, hov));
         text_center(sel ? FONT_TEXT_SEMIBOLD : FONT_TEXT, SC(13), lb.x + half * (f32)k + half * 0.5f, lcy, k ? L"English" : L"Русский", col);
     }
+    launch_pop(lxf, lbase);
 }
 
 static void draw_slider(void)
@@ -564,14 +694,12 @@ static void draw_bound_banner(void)
 {
     if (A.ban_t <= 0.003f) return;
     const Theme *t = &A.th;
-    const Colors *c = &A.c;
     Box *b = &A.ban;
     f32 base = R.opacity, k = ease_out_cubic(A.ban_t);
     R.opacity = base * k;
     // closing, it folds up under the card that slides over it
     r_set_clip(b->x, b->y, b->x + b->w, A.card.y - S(14) + S(1));
-    r_rect(b->x, b->y, b->w, b->h, c->card, S(10));
-    r_rect_ex(b->x, b->y, b->w, b->h, c->card_border, S(10), 1.f, 0);
+    draw_card(b);
     bool on = A.svc_on || !A.bound_mask;
     u32 col = on ? t->accent : t->warn;
     f32 isz = S(44), cy = b->y + b->h * 0.5f, ix = b->x + S(18);
@@ -601,8 +729,7 @@ static void draw_controls(void)
     const Theme *t = &A.th;
     const Colors *c = &A.c;
     Box *cd = &A.card;
-    r_rect(cd->x, cd->y, cd->w, cd->h, c->card, S(10));
-    r_rect_ex(cd->x, cd->y, cd->w, cd->h, c->card_border, S(10), 1.f, 0);
+    draw_card(cd);
     f32 lx = cd->x + S(22), fs = SC(14), top = cd->y + S(30);
 
     // left: the number of runs and the start button
@@ -676,6 +803,7 @@ static void draw_controls(void)
         CpuResult avg;
         for (int i = 0; i < A.nbest; i++) {
             Box *b = &A.pick_box[i];
+            RXf pxf = press_push(b, press_amt(b, A.press.type == HT_PICK && A.press.idx == i && h->type == HT_PICK && h->idx == i));
             f32 sel = i == 0 ? 1.f - A.pick_t : A.pick_t, hv = A.hv[HV_PICK0 + i];
             r_rect(b->x, b->y, b->w, b->h, color_mix(color_mix(c->ctl, c->ctl_hover, hv), color_alpha(t->accent, 0.16f), sel), S(8));
             r_rect_ex(b->x, b->y, b->w, b->h, color_mix(c->ctl_border, t->accent, sel), S(8), 1.f + sel * 0.5f, 0);
@@ -708,6 +836,7 @@ static void draw_controls(void)
                 else wfmt(st, countof(st), L"1%% low %.0f · 0.1%% low %.0f", avg.v[M_LOW1], avg.v[M_LOW01]);
                 text_draw_fit(FONT_TEXT, SC(12), tx, baseline_for(FONT_TEXT, SC(12), b->y + S(37)), tmax, st, -1, t->dim, false);
             }
+            r_xf_pop(pxf);
         }
         int cpu = A.best[A.pick];
         bool same = A.bound_mask == 1ull << cpu && A.svc_on, busy = g_task_busy != 0;
@@ -750,7 +879,7 @@ static void draw_tabs(void)
     const Theme *t = &A.th;
     const Colors *c = &A.c;
     Box *s = &A.strip, *b = &A.body;
-    f32 rad = S(10);
+    f32 rad = S(12);
     // The strip and the body fill different rows, so their translucent fills never overlap.
     r_set_clip(s->x, s->y, s->x + s->w, s->y + s->h);
     r_rect(s->x, s->y, s->w, s->h + rad * 2, c->strip, rad);
@@ -843,8 +972,7 @@ static void draw_table(void)
     const Theme *t = &A.th;
     const Colors *c = &A.c;
     if (!A.ntabs) {
-        r_rect(A.strip.x, A.strip.y, A.strip.w, A.strip.h + A.body.h, c->card, S(10));
-        r_rect_ex(A.strip.x, A.strip.y, A.strip.w, A.strip.h + A.body.h, c->card_border, S(10), 1.f, 0);
+        draw_card(&(Box){ A.strip.x, A.strip.y, A.strip.w, A.strip.h + A.body.h });
         draw_empty();
         return;
     }
@@ -869,16 +997,17 @@ static void draw_table(void)
     f32 hy = b->y + S(20), hfs = SC(12.5f);
     // A click on a header sorts by it, high to low first, then low to high; the sorted one is brighter, with an arrow.
     u32 arrow = A.sort_desc ? 0xE70D : 0xE70E;
-    bool hcpu = A.hover.type == HT_COLHDR && A.hover.idx == 0;
+    f32 hcpu = hover_amt(&A.sort_col, A.hover.type == HT_COLHDR && A.hover.idx == 0);
     f32 cx = text_draw(FONT_TEXT_SEMIBOLD, hfs, b->x + pad, baseline_for(FONT_TEXT, hfs, hy), L"CPU", -1,
-                       A.sort_col == 0 || hcpu ? t->text : t->dim);
+                       A.sort_col == 0 ? t->text : color_mix(t->dim, t->text, hcpu));
     if (A.sort_col == 0) text_draw_icon(arrow, SC(9), cx + S(10), hy, t->text);
     for (int k = 0; k < ncol; k++) {
-        bool sorted = A.sort_col == k + 1, hov = A.hover.type == HT_COLHDR && A.hover.idx == k + 1;
+        bool sorted = A.sort_col == k + 1;
+        f32 hov = hover_amt(&k_cols[k], A.hover.type == HT_COLHDR && A.hover.idx == k + 1);
         f32 right = b->x + pad + cpu_w + colw * (f32)(k + 1), lw = text_width(FONT_TEXT_SEMIBOLD, hfs, col_name(k_cols[k]), -1);
         f32 lx = MAX(b->x + pad + cpu_w + colw * (f32)k + (sorted ? S(14) : 0), right - lw);
         text_draw_fit(FONT_TEXT_SEMIBOLD, hfs, lx, baseline_for(FONT_TEXT, hfs, hy), right - lx + S(2), col_name(k_cols[k]), -1,
-                      sorted || hov ? t->text : t->dim, false);
+                      sorted ? t->text : color_mix(t->dim, t->text, hov), false);
         if (sorted) text_draw_icon(arrow, SC(9), lx - S(9), hy, t->text);
     }
     r_rect(b->x + S(12), b->y + S(39), b->w - S(24), 1, t->sep, 0);
@@ -1127,8 +1256,8 @@ static void modal_pass(bool draw)
         h += item_h[i] + S(18);
     }
     h += S(12) + S(34) + pad;
-    f32 k = ease_out_cubic(A.modal_t);
-    f32 x = floorf(((f32)A.W - w) * 0.5f), y = floorf(((f32)A.H - h) * 0.5f + (1.f - k) * S(12));
+    f32 k = A.modal_t;
+    f32 x = floorf(((f32)A.W - w) * 0.5f), y = floorf(((f32)A.H - h) * 0.5f);
     A.m_panel = (Box){ x, y, w, h };
     ModalSpec ms;
     modal_spec(&ms);
@@ -1137,11 +1266,9 @@ static void modal_pass(bool draw)
     A.m_cancel = (Box){ A.m_ok.x - S(8) - ms.cw, A.m_ok.y, ms.cw, S(34) };
     if (!draw) return;
 
-    R.opacity = k;
-    r_rect(0, 0, (f32)A.W, (f32)A.H, t->dark ? RGBA(0, 0, 0, 120) : RGBA(0, 0, 0, 70), 0);
-    r_rect_ex(x, y + S(8), w, h, c->shadow, S(12), 0, S(24));
-    r_rect(x, y, w, h, t->dark ? RGBA(43, 43, 46, 255) : RGBA(251, 251, 252, 255), S(12));
-    r_rect_ex(x, y, w, h, t->dark ? RGBA(255, 255, 255, 22) : RGBA(0, 0, 0, 22), S(12), 1.f, 0);
+    RXf xf = popup_push(&A.m_panel, k);
+    r_rect(x, y, w, h, t->dark ? RGBA(43, 43, 46, 255) : RGBA(251, 251, 252, 255), S(14));
+    r_rect_ex(x, y, w, h, t->dark ? RGBA(255, 255, 255, 22) : RGBA(0, 0, 0, 22), S(14), 1.f, 0);
 
     f32 cy = y + pad + S(18), ic = S(36);
     r_rect(x + pad, cy - ic * 0.5f, ic, ic, color_alpha(warn ? t->warn : t->accent, 0.18f), S(9));
@@ -1169,6 +1296,7 @@ static void modal_pass(bool draw)
     draw_button(&A.m_cancel, ms.cancel, 0, BTN_NEUTRAL, A.hv[HV_MCANCEL], A.press.type == HT_MCANCEL && hv->type == HT_MCANCEL, false);
     draw_button(&A.m_ok, ms.ok, ms.ok_glyph, BTN_ACCENT, A.hv[HV_MOK], A.press.type == HT_MOK && hv->type == HT_MOK,
                 A.mmode == MM_CPU0 && g_task_busy != 0);
+    r_xf_pop(xf);
     R.opacity = 1.f;
 }
 
@@ -1179,7 +1307,7 @@ static void modal_open_mode(int mode, int run)
     A.mmode = mode;
     A.mrun = run;
     A.modal = true;
-    A.modal_t = 0;
+    A.modal_t = A.modal_v = 0;
     A.hover.type = HT_NONE;
     invalidate();
 }
@@ -1188,22 +1316,22 @@ static void modal_close(bool start)
 {
     A.modal = false;
     if (A.mmode == MM_MSIDISK || A.mmode == MM_REBOOT) {
-        if (start) A.modal_t = 0;
+        if (start) A.modal_t = A.modal_v = 0;
         msi_modal_close(start);
     } else if (A.mmode == MM_CPU0) {
         // bind anyway, or back to the picker with the selection kept
-        A.modal_t = 0;
+        A.modal_t = A.modal_v = 0;
         if (start && !g_task_busy) {
             A.note[0] = 0;
             task_start(A.hwnd, true, A.pk_mask);
         } else if (!start) {
             A.picker = true;
-            A.picker_t = 0;
+            A.picker_t = A.picker_v = 0;
             A.hover.type = HT_NONE;
         }
     } else if (start) {
         // Gone at once: no fade-out drawn over the start of the test.
-        A.modal_t = 0;
+        A.modal_t = A.modal_v = 0;
         if (A.mmode == MM_FULL) start_or_stop();
         else test_start_one(A.mrun, A.mmode == MM_ADD);
     }
@@ -1231,8 +1359,8 @@ static void picker_pass(bool draw)
     f32 cw = floorf((w - pad * 2 - gap * (f32)(cols - 1)) / (f32)cols), ch = S(58);
     f32 grid_y = pad + S(40) + S(14) + lh * (f32)dl + S(16);
     f32 h = grid_y + (ch + gap) * (f32)rows - gap + S(16) + S(30) + S(36) + S(34) + pad;
-    f32 k = ease_out_cubic(A.picker_t);
-    f32 x = floorf(((f32)A.W - w) * 0.5f), y = floorf(((f32)A.H - h) * 0.5f + (1.f - k) * S(12));
+    f32 k = A.picker_t;
+    f32 x = floorf(((f32)A.W - w) * 0.5f), y = floorf(((f32)A.H - h) * 0.5f);
     A.pk_panel = (Box){ x, y, w, h };
     for (int i = 0; i < A.cpu.count; i++)
         A.pk_cell[i] = (Box){ x + pad + (cw + gap) * (f32)(i % cols), y + grid_y + (ch + gap) * (f32)(i / cols), cw, ch };
@@ -1243,11 +1371,9 @@ static void picker_pass(bool draw)
     A.pk_cancel = (Box){ A.pk_ok.x - S(8) - S(110), A.pk_ok.y, S(110), S(34) };
     if (!draw) return;
 
-    R.opacity = k;
-    r_rect(0, 0, (f32)A.W, (f32)A.H, c->overlay, 0);
-    r_rect_ex(x, y + S(8), w, h, c->shadow, S(12), 0, S(24));
-    r_rect(x, y, w, h, t->dark ? RGBA(43, 43, 46, 255) : RGBA(251, 251, 252, 255), S(12));
-    r_rect_ex(x, y, w, h, c->pop_border, S(12), 1.f, 0);
+    RXf xf = popup_push(&A.pk_panel, k);
+    r_rect(x, y, w, h, t->dark ? RGBA(43, 43, 46, 255) : RGBA(251, 251, 252, 255), S(14));
+    r_rect_ex(x, y, w, h, c->pop_border, S(14), 1.f, 0);
     f32 cy = y + pad + S(18), ic = S(36);
     r_rect(x + pad, cy - ic * 0.5f, ic, ic, color_alpha(t->accent, 0.18f), S(9));
     text_draw_icon(0xEEA1, SC(17), x + pad + ic * 0.5f, cy, t->accent);
@@ -1258,7 +1384,8 @@ static void picker_pass(bool draw)
     for (int i = 0; i < A.cpu.count; i++) {
         Box *b = &A.pk_cell[i];
         bool on = (A.pk_mask >> i) & 1, hov = A.hover.type == HT_PKCELL && A.hover.idx == i;
-        u32 bg = on ? color_alpha(t->accent, 0.18f) : hov ? c->ctl_hover : c->ctl;
+        RXf cxf = press_push(b, press_amt(b, hov && A.press.type == HT_PKCELL && A.press.idx == i));
+        u32 bg = color_mix(color_mix(c->ctl, c->ctl_hover, hover_amt(b, hov)), color_alpha(t->accent, 0.18f), on ? 1.f : 0.f);
         r_rect(b->x, b->y, b->w, b->h, bg, S(8));
         r_rect_ex(b->x, b->y, b->w, b->h, on ? t->accent : c->ctl_border, S(8), on ? S(1.5f) : 1.f, 0);
         WCHAR nm[16], sub[48];
@@ -1277,6 +1404,7 @@ static void picker_pass(bool draw)
             r_rect(dx, dy, d, d, t->accent, d * 0.5f);
             text_draw_icon(0xE73E, SC(10), dx + d * 0.5f, dy + d * 0.5f, t->on_accent);
         }
+        r_xf_pop(cxf);
     }
     if (A.nbest)
         draw_button(&A.pk_best, TR("Лучшее по тесту", "Best from the test"), 0xE735, BTN_NEUTRAL, A.hv[HV_PKBEST],
@@ -1296,6 +1424,7 @@ static void picker_pass(bool draw)
                 false);
     draw_button(&A.pk_ok, same ? TR("Уже привязано", "Already bound") : TR("Привязать", "Bind"), same ? 0xE73E : 0xE71B, BTN_ACCENT, A.hv[HV_PKOK],
                 A.press.type == HT_PKOK && A.hover.type == HT_PKOK, !A.pk_mask || same || g_task_busy);
+    r_xf_pop(xf);
     R.opacity = 1.f;
 }
 
@@ -1304,7 +1433,7 @@ static void picker_open(void)
     // start from what the GPU is bound to, else from the test's best core
     A.pk_mask = A.bound_mask ? A.bound_mask : A.nbest ? 1ull << A.best[A.pick] : 0;
     A.picker = true;
-    A.picker_t = 0;
+    A.picker_t = A.picker_v = 0;
     A.hover.type = HT_NONE;
     invalidate();
 }
@@ -1316,7 +1445,7 @@ static void picker_close(bool bind)
     A.picker = false;
     // CPU 0 in the selection: a warning first, with the way back to the picker
     if (bind && (A.pk_mask & 1) && !g_task_busy) {
-        A.picker_t = 0;
+        A.picker_t = A.picker_v = 0;
         modal_open_mode(MM_CPU0, 0);
         return;
     }
@@ -1339,22 +1468,26 @@ static void draw_toast(void)
 {
     if (A.toast_t <= 0 || !A.toast[0]) return;
     const Theme *t = &A.th;
-    const Colors *c = &A.c;
-    f32 e = ease_out_cubic(A.toast_t), fs = SC(13), x0 = content_x0(), x1 = content_x1();
+    f32 e = A.toast_t, fs = SC(13), x0 = content_x0(), x1 = content_x1();
     f32 w = MIN(x1 - x0, text_width(FONT_TEXT, fs, A.toast, -1) + S(64)), h = S(44);
-    f32 x = floorf((x0 + x1 - w) * 0.5f), y = floorf((f32)A.H - S(20) - h + (1.f - e) * S(16));
+    f32 x = floorf((x0 + x1 - w) * 0.5f), y = floorf((f32)A.H - S(20) - h);
     f32 keep = R.opacity;
-    R.opacity = e;
-    r_rect_ex(x, y + S(4), w, h, RGBA(0, 0, 0, t->dark ? 110 : 45), S(10), 0, S(10));
-    r_rect(x, y, w, h, c->card, S(10));
-    r_rect_ex(x, y, w, h, color_alpha(t->danger, 0.55f), S(10), 1.f, 0);
+    R.opacity = CLAMP(e * 1.5f, 0.f, 1.f);
+    // it rises from under the bottom edge with a spring, a little smaller at first
+    RXf xf = r_xf_push(0.92f + 0.08f * e, x + w * 0.5f, y + h, 0, (1.f - e) * S(28));
+    r_rect_ex(x, y + S(6), w, h, RGBA(0, 0, 0, t->dark ? 110 : 45), S(12), 0, S(14));
+    r_rect(x, y, w, h, t->dark ? RGBA(43, 43, 46, 255) : RGBA(251, 251, 252, 255), S(12));
+    r_rect_ex(x, y, w, h, color_alpha(t->danger, 0.55f), S(12), 1.f, 0);
     text_draw_icon(0xE783, SC(15), x + S(24), y + h * 0.5f, t->danger);
     text_draw_fit(FONT_TEXT, fs, x + S(44), baseline_for(FONT_TEXT, fs, y + h * 0.5f), w - S(60), A.toast, -1, t->text, false);
+    r_xf_pop(xf);
     R.opacity = keep;
 }
 
 #include "jobs.c"
 #include "donate.c"
+
+static bool page_open(void) { return !A.modal && !A.picker && !D.open; }
 #include "hwpage.c"
 #include "healthpage.c"
 #include "msipage.c"
@@ -1477,16 +1610,16 @@ static bool animate(f32 dt)
         else if (i == HV_MSIREBOOT) on = A.hover.type == HT_MSIREBOOT;
         else if (A.hover.type < countof(hv_of) && A.hover.type != HT_NONE) on = hv_of[A.hover.type] == i && A.hover.type != HT_PICK;
         if (i == HV_SLIDER && A.dragging) on = true;
-        anim |= approach(&A.hv[i], on ? 1.f : 0.f, 22.f, dt);
+        anim |= approach(&A.hv[i], on ? 1.f : 0.f, 16.f, dt);
     }
     anim |= approach(&A.slider_v, (f32)A.runs, 26.f, dt);
     if (A.ntabs) {
         Box *tb = &A.tabs[CLAMP(A.tab, 0, A.ntabs - 1)];
         static f32 wv;
-        anim |= spring_step(&A.tab_x, &A.tab_v, tb->x, 30.f, dt);
-        anim |= spring_step(&A.tab_w, &wv, tb->w, 30.f, dt);
+        anim |= spring(&A.tab_x, &A.tab_v, tb->x, 0.38f, 0.78f, 0.3f, dt);
+        anim |= spring(&A.tab_w, &wv, tb->w, 0.38f, 0.78f, 0.3f, dt);
     }
-    anim |= approach(&A.pick_t, (f32)A.pick, 20.f, dt);
+    anim |= spring(&A.pick_t, &A.pick_v, (f32)A.pick, 0.36f, 0.76f, 0.002f, dt);
     if (A.bound_mask) A.ban_mask = A.bound_mask;
     anim |= approach(&A.ban_t, A.bound_mask ? 1.f : 0.f, 12.f, dt);
     A.prog = bench_progress();
@@ -1504,17 +1637,32 @@ static bool animate(f32 dt)
     anim |= spring_step(&A.scroll, &A.scroll_v, A.scroll_target, 24.f, dt);
     bool sb_on = max_scroll() > 0 && !A.modal && !A.picker && !D.open && in_b(&A.body, (f32)A.mx, (f32)A.my);
     anim |= approach(&A.sb_t, sb_on ? 1.f : 0.f, sb_on ? 20.f : 7.f, dt);
-    anim |= approach(&A.modal_t, A.modal ? 1.f : 0.f, A.modal ? 14.f : 18.f, dt);
-    anim |= approach(&A.picker_t, A.picker ? 1.f : 0.f, A.picker ? 14.f : 18.f, dt);
-    anim |= approach(&A.lang_t, g_lang_ru ? 0.f : 1.f, 18.f, dt);
+    // dialogs open with a little bounce and close quickly without one
+    anim |= spring(&A.modal_t, &A.modal_v, A.modal ? 1.f : 0.f, A.modal ? 0.42f : 0.24f, A.modal ? 0.74f : 1.f, 0.002f, dt);
+    anim |= spring(&A.picker_t, &A.picker_v, A.picker ? 1.f : 0.f, A.picker ? 0.42f : 0.24f, A.picker ? 0.74f : 1.f, 0.002f, dt);
+    anim |= spring(&A.lang_t, &A.lang_v, g_lang_ru ? 0.f : 1.f, 0.4f, 0.72f, 0.002f, dt);
     if (A.page == PG_HW && HW.ready && A.score_t < 1.f) {
         A.score_t = g_reduced_motion ? 1.f : MIN(1.f, A.score_t + dt / 1.1f);
         anim = true;
     }
     Box nb;
     nav_box(A.page, &nb);
-    anim |= spring_step(&A.nav_y, &A.nav_v, nb.y, 26.f, dt);
-    for (int i = 0; i < PG__COUNT; i++) anim |= approach(&A.nav_hov[i], A.hover.type == HT_NAV && A.hover.idx == i ? 1.f : 0.f, 20.f, dt);
+    anim |= spring(&A.nav_y, &A.nav_v, nb.y, 0.42f, 0.78f, 0.3f, dt);
+    for (int i = 0; i < PG__COUNT; i++) anim |= approach(&A.nav_hov[i], A.hover.type == HT_NAV && A.hover.idx == i ? 1.f : 0.f, 16.f, dt);
+    if (A.launch_t < 1.2f) {
+        A.launch_t = g_reduced_motion ? 1.2f : MIN(1.2f, A.launch_t + dt);
+        anim = true;
+    }
+    // the control under a held mouse sinks in quickly and bounces back when let go
+    const void *seen = A.prs_seen;
+    A.prs_seen = NULL;
+    if (seen && seen != A.prs_key) {
+        A.prs_key = seen;
+        A.prs_t = A.prs_v = 0;
+    }
+    A.prs_held = seen != NULL;
+    anim |= spring(&A.prs_t, &A.prs_v, seen ? 1.f : 0.f, seen ? 0.18f : 0.4f, seen ? 1.f : 0.45f, 0.002f, dt);
+    if (!seen && !A.prs_t && !A.prs_v) A.prs_key = NULL;
     A.hw_scroll_target = CLAMP(A.hw_scroll_target, 0.f, hw_max_scroll());
     anim |= spring_step(&A.hw_scroll, &A.hw_scroll_v, A.hw_scroll_target, 24.f, dt);
     bool hw_sb = A.page == PG_HW && hw_max_scroll() > 0 && A.mx >= content_x0();
@@ -1537,9 +1685,10 @@ static bool animate(f32 dt)
     anim |= approach(&A.rb_t, A.rb_n ? 1.f : 0.f, 12.f, dt);
     anim |= approach(&A.rb_hv, A.hover.type == HT_REBOOT ? 1.f : 0.f, 20.f, dt);
     bool toast = time_now() < A.toast_until;
-    anim |= approach(&A.toast_t, toast ? 1.f : 0.f, toast ? 14.f : 8.f, dt) || toast;
+    anim |= spring(&A.toast_t, &A.toast_v, toast ? 1.f : 0.f, toast ? 0.5f : 0.3f, toast ? 0.68f : 1.f, 0.002f, dt) || toast;
     anim |= don_animate(dt);
     anim |= confetti_animate(dt);
+    anim |= hover_animate(dt);
     return anim;
 }
 
@@ -1562,14 +1711,18 @@ static void render(void)
     layout();
     A.animating = animate(dt);
     R.scale = 1.f;
+    g_hf_changed = false;
     r_begin();
     draw_all();
     if (F.overflow) {
         font_reset_atlas();
+        A.prs_seen = NULL;
         r_begin();
         draw_all();
         F.overflow = false;
     }
+    // a control was pressed or let go in this frame: one more frame starts its spring
+    if ((A.prs_seen != NULL) != A.prs_held || g_hf_changed) A.animating = true;
     r_end_and_present();
     A.dirty = false;
 }

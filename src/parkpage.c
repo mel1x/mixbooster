@@ -24,9 +24,44 @@ static struct {
     Box cell[MAX_CPUS];
     WCHAR note[160];
     bool note_bad;
-} PR = { .drag = -1 };
+    int park_seq, park_pend;    // the parking switch's clicks and jobs not done
+    int park_want;              // what the last click asked for while its job runs, -1 none
+    GUID park_plan;             // and for which plan and power source
+    int park_dc;
+} PR = { .drag = -1, .park_want = -1 };
 
-static bool pr_parking_on(void) { return PR.val[PS_PARK] < 100 || (PR.hybrid && PR.val[PS_PARK1] < 100); }
+static bool pk_parking_read(const GUID *plan, bool dc, bool hybrid)
+{
+    return pk_read(plan, PS_PARK, dc) < 100 || (hybrid && pk_read(plan, PS_PARK1, dc) < 100);
+}
+
+// The switch: what was clicked while the job runs on the plan shown, else what the plan has.
+static bool pr_parking_on(void)
+{
+    if (PR.park_want >= 0 && PR.sel >= 0 && PR.sel < PR.nplan && IsEqualGUID(&PR.park_plan, &PR.plan[PR.sel].id) && PR.park_dc == PR.dc)
+        return PR.park_want != 0;
+    return PR.val[PS_PARK] < 100 || (PR.hybrid && PR.val[PS_PARK1] < 100);
+}
+
+static bool pr_park_run(Job *j)
+{
+    pk_set_parking(&j->u.park.plan, j->u.park.dc, j->on);
+    return pk_parking_read(&j->u.park.plan, j->u.park.dc, A.cpu.hybrid) == j->on;
+}
+
+static void pr_values(void);
+
+static void pr_park_done(Job *j, bool ok)
+{
+    PR.park_pend--;
+    if (j->seq == PR.park_seq) {
+        PR.park_want = -1;
+        if (!ok)
+            toast_show(TR("Не удалось изменить парковку ядер: Windows не приняла значение схемы питания",
+                          "Couldn't change core parking: Windows didn't take the power plan value"));
+    }
+    if (!PR.park_pend) pr_values();
+}
 
 static void pr_values(void)
 {
@@ -429,8 +464,15 @@ static void pr_click(Hit h)
         break;
     case HT_PRPARK:
         if (PR.sel >= 0 && PR.sel < PR.nplan) {
-            pk_set_parking(&PR.plan[PR.sel].id, PR.dc != 0, !pr_parking_on());
-            pr_values();
+            bool on = !pr_parking_on();
+            PR.park_want = on;
+            PR.park_plan = PR.plan[PR.sel].id;
+            PR.park_dc = PR.dc;
+            PR.park_pend++;
+            Job j = { pr_park_run, pr_park_done, 0, ++PR.park_seq, on };
+            j.u.park.plan = PR.park_plan;
+            j.u.park.dc = PR.dc != 0;
+            job_post(A.hwnd, &j);
         }
         break;
     }

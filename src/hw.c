@@ -42,6 +42,7 @@ typedef struct HwData {
     HwCard card[HWC__COUNT];
     HwStat stat[4];
     int score_total, score_part[SC__COUNT];
+    WCHAR score_name[SC__COUNT][96];  // what each part of the score is: the GPU, the CPU, the memory, the system drive
 } HwData;
 
 // The thread builds HWT off-screen and swaps it into HW.d whole, so the page never shows half-read data: the old
@@ -615,7 +616,10 @@ static void hw_disks(void)
         // the drive Windows lives on decides the score's drive part
         WCHAR sys[4] = L"C:";
         GetEnvironmentVariableW(L"SystemDrive", sys, countof(sys));
-        if (wcsstr(letters[i], sys)) SCORE.sys_disk = !ssd ? 1 : bus == BusTypeNvme ? 3 : 2;
+        if (wcsstr(letters[i], sys)) {
+            SCORE.sys_disk = !ssd ? 1 : bus == BusTypeNvme ? 3 : 2;
+            wcopy(SCORE.sys_disk_name, countof(SCORE.sys_disk_name), model[0] ? model : path + 4);
+        }
         if (count == 1) wcopy(c->head, countof(c->head), model);
     }
     WCHAR ts[32];
@@ -774,6 +778,49 @@ static void hw_os(void)
     else row_add(c, false, TR("Работает", "Uptime"), TR("%llu ч %llu мин", "%llu h %llu min"), up / 60, up % 60);
 }
 
+// The CPU's name without the marks and the tail that only make it long: "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz" ->
+// "Intel Core i7-9700K", "AMD Ryzen 5 5600X 6-Core Processor" -> "AMD Ryzen 5 5600X".
+static void cpu_short(WCHAR *out, int cap, const WCHAR *name)
+{
+    WCHAR s[128];
+    int n = 0;
+    for (const WCHAR *p = name; *p && n < countof(s) - 1;) {
+        if (!_wcsnicmp(p, L"(R)", 3)) p += 3;
+        else if (!_wcsnicmp(p, L"(TM)", 4)) p += 4;
+        else s[n++] = *p++;
+    }
+    s[n] = 0;
+    WCHAR *cut = wcsstr(s, L" CPU @");
+    if (!cut) cut = wcsstr(s, L" @ ");
+    if (cut) *cut = 0;
+    static const WCHAR *tails[] = { L" Processor", L" CPU" };
+    for (int k = 0; k < countof(tails); k++) {
+        int sl = wlen(s), tl = wlen(tails[k]);
+        if (sl > tl && !_wcsicmp(s + sl - tl, tails[k])) s[sl - tl] = 0;
+    }
+    // "6-Core", "Six-Core": the whole word goes
+    WCHAR *core = wcsstr(s, L"-Core");
+    if (!core) core = wcsstr(s, L"-core");
+    if (core) {
+        while (core > s && core[-1] != L' ') core--;
+        *core = 0;
+    }
+    int sl = wlen(s);
+    while (sl && s[sl - 1] == L' ') s[--sl] = 0;
+    wcopy(out, cap, s);
+}
+
+// What each part of the score is, for the score's tiles.
+static void score_names(void)
+{
+    wcopy(HWT.score_name[SC_GPU], 96, SCORE.gpu_name);
+    cpu_short(HWT.score_name[SC_CPU], 96, SCORE.cpu_name);
+    const WCHAR *ram = HWT.card[HWC_RAM].head;
+    if (SCORE.ram_speed && wcschr(ram, L'D')) wfmt(HWT.score_name[SC_RAM], 96, L"%s-%d", ram, SCORE.ram_speed);
+    else wcopy(HWT.score_name[SC_RAM], 96, ram);
+    wcopy(HWT.score_name[SC_DISK], 96, SCORE.sys_disk_name);
+}
+
 static DWORD WINAPI hw_thread(void *arg)
 {
     HWND notify = (HWND)arg;
@@ -798,6 +845,7 @@ again:
     if (InterlockedExchange(&HW.again, 0)) goto again;
     HWT.score_total = SCORE.total;
     memcpy(HWT.score_part, SCORE.part, sizeof HWT.score_part);
+    score_names();
     AcquireSRWLockExclusive(&HW.lock);
     HW.d = HWT;
     ReleaseSRWLockExclusive(&HW.lock);

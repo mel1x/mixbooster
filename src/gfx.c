@@ -1,5 +1,6 @@
 // The "Graphics" page: the Windows switches for games and the GPU, the ones in Settings > Display > Graphics and a few
-// it hides. Each one applies on a click, like Windows' own; HAGS and MPO wait for a restart.
+// it hides. Each one flips on a click and applies on the job thread (jobs.c), going back if the change didn't take;
+// HAGS and MPO wait for a restart.
 //
 //   HAGS   HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers  HwSchMode = 2 on, 1 off; absent: the driver's default.
 //          Whether the GPU can do it and runs it now comes from the kernel driver interface (D3DKMT, WDDM 2.7 caps).
@@ -28,6 +29,7 @@ static struct {
     bool on[GX__COUNT];
     bool hags_sup, hags_run, hags_def;
     f32 tog[GX__COUNT];
+    int seq[GX__COUNT], pend;  // clicks per switch, and jobs not done: Windows is read again once they are
     f32 scroll, scroll_target, scroll_v, content_h, sb_t;
     Box card, rows[GX__COUNT], sw[GX__COUNT];
 } GX;
@@ -225,7 +227,40 @@ static void gx_set(int i, bool on)
         break;
     }
     log_msg("gfx: %d -> %s", i, on ? "on" : "off");
-    gx_read();
+}
+
+// What the registry says now, for a job to check its change took.
+static bool gx_is_on(int i)
+{
+    switch (i) {
+    case GX_HAGS: return gx_get(HKEY_LOCAL_MACHINE, GX_DRV_KEY, L"HwSchMode") == 2;
+    case GX_MPO: return mpo_on();
+    case GX_VRR: return dx_get(L"VRROptimizeEnable") == 1;
+    case GX_WGO: return dx_get(L"SwapEffectUpgradeEnable") == 1;
+    case GX_FSO: return fso_on();
+    }
+    return false;
+}
+
+static bool gx_job_run(Job *j)
+{
+    gx_set(j->idx, j->on);
+    return gx_is_on(j->idx) == j->on;
+}
+
+static void gx_job_done(Job *j, bool ok)
+{
+    GX.pend--;
+    if (!ok && j->seq == GX.seq[j->idx]) {
+        GX.on[j->idx] = !j->on;
+        toast_show(TR("Не удалось изменить настройку графики: Windows не дала записать её в реестр",
+                      "Couldn't change the graphics setting: Windows didn't let it into the registry"));
+    }
+    // all done: what Windows has now, with the restart marks
+    if (!GX.pend) {
+        gx_read();
+        refresh_reboot();
+    }
 }
 
 // --- the page ------------------------------------------------------------------------------------------------------
@@ -235,8 +270,8 @@ static const struct {
     const WCHAR *ru, *en, *dru, *den;
 } k_gx[GX__COUNT] = {
     { 0xF211, L"Аппаратное планирование GPU (HAGS)", L"Hardware-accelerated GPU scheduling (HAGS)",
-      L"Видеокарта сама ведёт очередь своих задач, а не процессор. Нужно для генерации кадров DLSS 3 и FSR 3; на старых драйверах иногда даёт микрофризы.",
-      L"The GPU runs its own work queue instead of the CPU. Needed for DLSS 3 and FSR 3 frame generation; on old drivers it can cause stutter." },
+      L"Видеокарта сама ведёт очередь своих задач, а не процессор. Нужно для генерации кадров DLSS; на старых драйверах иногда даёт микрофризы.",
+      L"The GPU runs its own work queue instead of the CPU. Needed for DLSS frame generation; on old drivers it can cause stutter." },
     { 0xE7F4, L"Multiplane Overlay (MPO)", L"Multiplane Overlay (MPO)",
       L"Даёт играм в окне без рамки выводить кадры в обход DWM, с задержкой как в полноэкранном режиме. Выключайте, только если мерцает экран или видео в браузере фризит поверх игры.",
       L"Lets borderless games skip DWM and present with fullscreen latency. Turn it off only if the screen flickers or browser video stutters over a game." },
@@ -262,7 +297,7 @@ static void gx_layout(void)
         GX.rows[i] = (Box){ x0, y + S(6) + S(GX_ROW_H) * (f32)i, cw, S(GX_ROW_H) };
         GX.sw[i] = (Box){ x0 + cw - S(24) - S(52), GX.rows[i].y + (S(GX_ROW_H) - S(32)) * 0.5f, S(52), S(32) };
     }
-    GX.content_h = GX.card.h + S(70);
+    GX.content_h = GX.card.h + S(16);
 }
 
 // A row of a settings card: the icon, the name, the explanation in up to two lines, and a note under it.
@@ -292,7 +327,7 @@ static void draw_gfx_page(void)
 {
     const Theme *t = &A.th;
     const Colors *c = &A.c;
-    if (!GX.ready) gx_read();
+    if (!GX.ready && !GX.pend) gx_read();
     gx_layout();
     f32 top = S(HW_TOP) - S(6);
     r_set_clip(0, top, (f32)A.W, (f32)A.H);
@@ -333,12 +368,6 @@ static void draw_gfx_page(void)
         draw_switch(&GX.sw[i], GX.tog[i], enabled, enabled && A.hover.type == HT_GFXTOG && A.hover.idx == i);
         if (i + 1 < GX__COUNT) r_rect(r->x + S(20), r->y + r->h - 1, r->w - S(40), 1, color_alpha(t->sep, 0.7f), 0);
     }
-    f32 ny = b->y + b->h + S(22);
-    text_draw_icon(0xE946, SC(13), b->x + S(10), ny, t->faint);
-    text_draw_fit(FONT_TEXT, SC(12.5f), b->x + S(26), baseline_for(FONT_TEXT, SC(12.5f), ny), b->w - S(26),
-                  TR("Это те же настройки, что в «Параметры › Дисплей › Графика»; MPO и полноэкранная оптимизация там скрыты",
-                     "The same settings as Settings › Display › Graphics; MPO and fullscreen optimizations are hidden there"),
-                  -1, t->faint, false);
     r_set_clip(0, 0, (f32)A.W, (f32)A.H);
     f32 ms = gx_max_scroll();
     if (ms > 0 && GX.sb_t > 0) {
@@ -369,6 +398,9 @@ static Hit gx_hit(f32 x, f32 y)
 static void gx_click(Hit h)
 {
     if (h.type != HT_GFXTOG || h.idx < 0 || h.idx >= GX__COUNT) return;
-    gx_set(h.idx, !GX.on[h.idx]);
-    refresh_reboot();
+    int i = h.idx;
+    GX.on[i] = !GX.on[i];
+    GX.pend++;
+    Job j = { gx_job_run, gx_job_done, i, ++GX.seq[i], GX.on[i] };
+    job_post(A.hwnd, &j);
 }

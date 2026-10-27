@@ -1,5 +1,5 @@
 // The window: a sidebar with the pages; GPU Affinity's test controls, best cores and results table with a tab per run
-// live here, the other pages in hwpage.c, healthpage.c, msipage.c, parkpage.c and gfx.c. Everything is drawn by render.c, laid out in DIPs and scaled by the window's DPI.
+// live here, the other pages in hwpage.c, healthpage.c, msipage.c, parkpage.c, gfx.c and gamepage.c. Everything is drawn by render.c, laid out in DIPs and scaled by the window's DPI.
 
 #ifdef MB_DEV_BUILD
 #define APP_CLASS L"MixBoosterDevWindow"  // runs next to an installed copy
@@ -67,13 +67,16 @@ enum {
     HT_PRPARK,
     HT_PRSLIDER,  // idx: PS_*
     HT_REBOOT,    // "Restart needed" in the sidebar
+    HT_GMTOG,     // the Game fixes page; idx: the game
+    HT_GMDEL,     // idx: the game added by hand
+    HT_GMADD,
 };
 
 // Hover animation slots.
 enum { HV_MIN, HV_CLOSE, HV_NAV, HV_SLIDER, HV_START, HV_PICK0, HV_PICK1, HV_BIND, HV_RESET, HV_MOK, HV_MCANCEL, HV_DONATE, HV_LANG, HV_MANUAL, HV_PKBEST, HV_PKCLEAR, HV_PKOK, HV_PKCANCEL, HV_HLREFRESH, HV_TABPLUS, HV_RERUN, HV_MSIAPPLY, HV_MSIDISCARD, HV_MSIRESET, HV_MSIREBOOT, HV_TAB0, HV__COUNT = HV_TAB0 + 1 + BENCH_MAX_RUNS };
 
 // The sidebar pages, top to bottom.
-enum { PG_HW, PG_HEALTH, PG_AFF, PG_MSI, PG_PARK, PG_GFX, PG__COUNT };
+enum { PG_HW, PG_HEALTH, PG_AFF, PG_MSI, PG_PARK, PG_GFX, PG_GAMES, PG__COUNT };
 
 static const struct { u32 glyph; const WCHAR *ru, *en; } k_pages[PG__COUNT] = {
     { 0xE7F4, L"Комплектующие ПК", L"PC components" },
@@ -82,6 +85,7 @@ static const struct { u32 glyph; const WCHAR *ru, *en; } k_pages[PG__COUNT] = {
     { 0xE9E9, L"MSI Mode", L"MSI Mode" },
     { 0xE945, L"Парковка ядер", L"Core parking" },
     { 0xE790, L"Графика", L"Graphics" },
+    { 0xE7FC, L"Игровые фиксы", L"Game fixes" },
 };
 
 typedef struct Hit {
@@ -154,6 +158,9 @@ static struct {
     WCHAR rb_text[160];       // what waits for a restart, for the sidebar card
     int rb_n;
     f32 rb_t, rb_hv;
+    WCHAR toast[200];         // a switch's change that didn't go through, at the bottom for a few seconds
+    f64 toast_until;
+    f32 toast_t;
 
     // layout, rebuilt every frame
     Box card, slider, start, pick_box[2], bind, reset, strip, body, rows;
@@ -1320,12 +1327,40 @@ static void picker_close(bool bind)
     invalidate();
 }
 
+// A line at the bottom of the page when a switch's change failed and the switch went back.
+static void toast_show(const WCHAR *s)
+{
+    wcopy(A.toast, countof(A.toast), s);
+    A.toast_until = time_now() + 4.5;
+    invalidate();
+}
+
+static void draw_toast(void)
+{
+    if (A.toast_t <= 0 || !A.toast[0]) return;
+    const Theme *t = &A.th;
+    const Colors *c = &A.c;
+    f32 e = ease_out_cubic(A.toast_t), fs = SC(13), x0 = content_x0(), x1 = content_x1();
+    f32 w = MIN(x1 - x0, text_width(FONT_TEXT, fs, A.toast, -1) + S(64)), h = S(44);
+    f32 x = floorf((x0 + x1 - w) * 0.5f), y = floorf((f32)A.H - S(20) - h + (1.f - e) * S(16));
+    f32 keep = R.opacity;
+    R.opacity = e;
+    r_rect_ex(x, y + S(4), w, h, RGBA(0, 0, 0, t->dark ? 110 : 45), S(10), 0, S(10));
+    r_rect(x, y, w, h, c->card, S(10));
+    r_rect_ex(x, y, w, h, color_alpha(t->danger, 0.55f), S(10), 1.f, 0);
+    text_draw_icon(0xE783, SC(15), x + S(24), y + h * 0.5f, t->danger);
+    text_draw_fit(FONT_TEXT, fs, x + S(44), baseline_for(FONT_TEXT, fs, y + h * 0.5f), w - S(60), A.toast, -1, t->text, false);
+    R.opacity = keep;
+}
+
+#include "jobs.c"
 #include "donate.c"
 #include "hwpage.c"
 #include "healthpage.c"
 #include "msipage.c"
 #include "gfx.c"
 #include "parkpage.c"
+#include "gamepage.c"
 
 static void draw_all(void)
 {
@@ -1373,6 +1408,11 @@ static void draw_all(void)
         text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100),
                       TR("Схемы электропитания, парковка и частота процессора", "Power plans, core parking and processor speed"), -1, t->dim, false);
         draw_park_page();
+    } else if (A.page == PG_GAMES) {
+        text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, TR("Игровые фиксы", "Game fixes"), -1, t->text);
+        text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100),
+                      TR("Настройки для отдельных игр, по их exe", "Settings for single games, by their exe"), -1, t->dim, false);
+        draw_game_page();
     } else {
         text_draw(FONT_TEXT_SEMIBOLD, SC(20), x0 + S(2), S(42) + rise, TR("Графика", "Graphics"), -1, t->text);
         text_draw_fit(FONT_TEXT, SC(13), x0 + S(2), S(66) + rise, content_x1() - x0 - S(100),
@@ -1382,6 +1422,7 @@ static void draw_all(void)
     R.opacity = 1.f;
     if (A.modal || A.modal_t > 0) modal_pass(true);
     if (A.picker || A.picker_t > 0) picker_pass(true);
+    draw_toast();
     if (D.open) draw_donate();
     confetti_draw();
 
@@ -1491,9 +1532,12 @@ static bool animate(f32 dt)
     anim |= approach(&A.hl_sb_t, hl_sb ? 1.f : 0.f, hl_sb ? 20.f : 7.f, dt);
     anim |= msi_animate(dt);
     anim |= gx_animate(dt);
+    anim |= gm_animate(dt);
     anim |= pr_animate(dt);
     anim |= approach(&A.rb_t, A.rb_n ? 1.f : 0.f, 12.f, dt);
     anim |= approach(&A.rb_hv, A.hover.type == HT_REBOOT ? 1.f : 0.f, 20.f, dt);
+    bool toast = time_now() < A.toast_until;
+    anim |= approach(&A.toast_t, toast ? 1.f : 0.f, toast ? 14.f : 8.f, dt) || toast;
     anim |= don_animate(dt);
     anim |= confetti_animate(dt);
     return anim;
@@ -1591,6 +1635,7 @@ static Hit hit_test(int mx, int my)
     if (A.page == PG_HEALTH && A.hl_refresh.w > 0 && in_b(&A.hl_refresh, x, y)) return (Hit){ HT_HLREFRESH, -1 };
     if (A.page == PG_MSI) return msi_hit(x, y);
     if (A.page == PG_GFX) return gx_hit(x, y);
+    if (A.page == PG_GAMES) return gm_hit(x, y);
     if (A.page == PG_PARK) return pr_hit(x, y);
     if (A.page != PG_AFF) return h;
     Box sl = { A.slider.x - S(12), A.slider.y - S(14), A.slider.w + S(24), S(28) };
@@ -1660,6 +1705,7 @@ static void set_page(int i)
     if (i == PG_MSI && !msi_dirty_count()) MS.ready = false;
     // the other two read Windows fresh each time too; the parking page watches the cores while it is up
     if (i == PG_GFX) GX.ready = false;
+    if (i == PG_GAMES) GM.ready = false;
     if (i == PG_PARK) {
         PR.ready = false;
         SetTimer(A.hwnd, TIMER_PARK, 1000, NULL);
@@ -1813,6 +1859,7 @@ static void mouse_up(int mx, int my)
             msi_click(h);
             gx_click(h);
             pr_click(h);
+            gm_click(h);
             break;
         }
     }
@@ -1856,11 +1903,13 @@ static void key_down(UINT vk)
                   : A.page == PG_HEALTH ? &A.hl_scroll_target
                   : A.page == PG_MSI    ? &MP.scroll_target
                   : A.page == PG_PARK   ? &PR.scroll_target
+                  : A.page == PG_GAMES  ? &GM.scroll_target
                                         : &GX.scroll_target;
         f32 ms = A.page == PG_HW       ? hw_max_scroll()
                  : A.page == PG_HEALTH ? hl_max_scroll()
                  : A.page == PG_MSI    ? msi_max_scroll()
                  : A.page == PG_PARK   ? pr_max_scroll()
+                 : A.page == PG_GAMES  ? gm_max_scroll()
                                        : gx_max_scroll();
         if (vk == VK_UP || vk == VK_DOWN) *st += vk == VK_UP ? -S(60) : S(60);
         if (vk == VK_PRIOR || vk == VK_NEXT) *st += (vk == VK_PRIOR ? -1.f : 1.f) * hw_view_h() * 0.8f;
@@ -2023,6 +2072,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             PR.scroll_target = CLAMP(PR.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(90), 0.f, pr_max_scroll());
         } else if (A.page == PG_GFX) {
             GX.scroll_target = CLAMP(GX.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(90), 0.f, gx_max_scroll());
+        } else if (A.page == PG_GAMES) {
+            GM.scroll_target = CLAMP(GM.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(90), 0.f, gm_max_scroll());
         }
         else A.scroll_target = CLAMP(A.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(76), 0.f, max_scroll());
         invalidate();
@@ -2058,6 +2109,15 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         invalidate();
         return 0;
     case WM_APP_HEALTH:
+        invalidate();
+        return 0;
+    case WM_APP_JOB_DONE:
+        job_finish((Job *)lp);
+        invalidate();
+        return 0;
+    case WM_APP_GAME_DONE:
+        gm_done(wp != 0);
+        refresh_binding();
         invalidate();
         return 0;
     case WM_APP_MSI_DONE:
@@ -2128,6 +2188,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         if (g_task_busy) return 0;
+        job_drain(5000);
         DestroyWindow(h);
         return 0;
     case WM_DESTROY:

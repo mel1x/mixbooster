@@ -10,6 +10,7 @@
 #include "hw.c"
 #include "health.c"
 #include "bench.c"
+#include "games.c"
 #include "service.c"
 #include "park.c"
 #include "app.c"

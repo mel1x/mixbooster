@@ -1,5 +1,5 @@
 // The "MixBooster GPU Affinity" service: keeps the GPU on the chosen core, and the MSI mode and interrupt priority
-// set on the MSI Mode page. A driver install or update recreates the device's registry key and drops them, so the
+// set on the MSI Mode page, and the game fixes (games.c watches the game processes on its own thread). A driver install or update recreates the device's registry key and drops them, so the
 // service checks at startup and every time a device arrives, rewrites what is missing and restarts the GPU driver to
 // apply its core (the MSI settings apply on the next boot).
 //
@@ -72,6 +72,8 @@ static void WINAPI svc_main(DWORD argc, LPWSTR *argv)
     // every device interface: a GPU, a network card or a USB controller whose driver was just installed
     HDEVNOTIFY dn = RegisterDeviceNotificationW(g_svc_handle, &filter, DEVICE_NOTIFY_SERVICE_HANDLE | DEVICE_NOTIFY_ALL_INTERFACE_CLASSES);
 
+    HANDLE gw = CreateThread(NULL, 0, games_watch_thread, g_svc_stop, 0, NULL);
+
     // At boot the policy is normally in place already; this only acts when an update removed it while Windows was off.
     if (WaitForSingleObject(g_svc_stop, 5000) == WAIT_TIMEOUT) svc_check();
     HANDLE ev[2] = { g_svc_stop, g_svc_kick };
@@ -88,6 +90,10 @@ static void WINAPI svc_main(DWORD argc, LPWSTR *argv)
         svc_check();
     }
     if (dn) UnregisterDeviceNotification(dn);
+    if (gw) {
+        WaitForSingleObject(gw, 5000);
+        CloseHandle(gw);
+    }
     svc_report(SERVICE_STOPPED);
 }
 
@@ -158,7 +164,7 @@ static bool svc_install(void)
     }
     bool ok = false;
     if (s) {
-        SERVICE_DESCRIPTIONW d = { (LPWSTR)L"Keeps the GPU interrupt core, the MSI mode and the interrupt priorities set in MixBooster after driver updates." };
+        SERVICE_DESCRIPTIONW d = { (LPWSTR)L"Keeps the GPU interrupt core, the MSI mode and the interrupt priorities set in MixBooster after driver updates, and the game fixes." };
         ChangeServiceConfig2W(s, SERVICE_CONFIG_DESCRIPTION, &d);
         SC_ACTION act[3] = { { SC_ACTION_RESTART, 10000 }, { SC_ACTION_RESTART, 60000 }, { SC_ACTION_NONE, 0 } };
         SERVICE_FAILURE_ACTIONSW fa = { 86400, NULL, NULL, 3, act };
@@ -191,6 +197,13 @@ static void svc_remove(void)
     }
 }
 
+// The service runs while it has something to keep: the GPU core, MSI settings or a game fix.
+static bool svc_needed(void)
+{
+    u64 mask = 0;
+    return (reg_get_u64(L"GpuMask", &mask) && mask) || msi_saved_any() || games_any();
+}
+
 // --- the bind and reset actions, on a worker thread ----------------------------------------------------------------
 
 static volatile LONG g_task_busy;
@@ -207,9 +220,9 @@ static DWORD WINAPI bind_thread(void *arg)
         ok = svc_install();
         log_msg("bound the GPU to 0x%llx, service %s", (unsigned long long)mask, ok ? "running" : "failed");
     } else {
-        // the service stays while it still keeps MSI settings
-        if (!msi_saved_any()) svc_remove();
         reg_delete(L"GpuMask");
+        // the service stays while it still keeps MSI settings or game fixes
+        if (!svc_needed()) svc_remove();
         bridges_clear();
         gpus_apply(0, false, false);
         log_msg("GPU affinity reset");
@@ -246,11 +259,9 @@ static DWORD WINAPI msi_thread(void *arg)
         pb_restore();
     }
     reboot_mark(L"Msi");
-    // the service runs while it has something to keep
-    u64 mask = 0;
     bool ok = true;
     if (msi_saved_any()) ok = svc_install();
-    else if (!(reg_get_u64(L"GpuMask", &mask) && mask)) svc_remove();
+    else if (!svc_needed()) svc_remove();
     InterlockedExchange(&g_task_busy, 0);
     PostMessageW(g_task_notify, WM_APP_MSI_DONE, ok, 0);
     return 0;
@@ -265,6 +276,37 @@ static void msi_task_start(HWND notify, const MsiDev *devs, int n)
     if (devs) memcpy(g_msi_task, devs, sizeof(MsiDev) * (size_t)n);
     g_msi_task_n = devs ? n : 0;
     HANDLE t = CreateThread(NULL, 0, msi_thread, devs ? (void *)1 : NULL, 0, NULL);
+    if (t) CloseHandle(t);
+    else InterlockedExchange(&g_task_busy, 0);
+}
+
+// The Game fixes page: the service is put in (a fresh copy, once a session: an older one doesn't watch games) when a
+// game is turned on, and removed when nothing is left for it.
+static bool g_games_svc_fresh;
+
+static DWORD WINAPI games_svc_thread(void *arg)
+{
+    bool ok = true;
+    if (arg) {
+        ok = svc_install();
+        if (ok) g_games_svc_fresh = true;
+    } else if (!svc_needed()) {
+        svc_remove();
+    }
+    InterlockedExchange(&g_task_busy, 0);
+    PostMessageW(g_task_notify, WM_APP_GAME_DONE, ok, 0);
+    return 0;
+}
+
+static void games_svc_update(HWND notify)
+{
+    bool need = games_any();
+    if (need && g_games_svc_fresh && svc_running()) return;
+    if (!need && !svc_running()) return;
+    if (g_task_busy) return;
+    InterlockedExchange(&g_task_busy, 1);
+    g_task_notify = notify;
+    HANDLE t = CreateThread(NULL, 0, games_svc_thread, need ? (void *)1 : NULL, 0, NULL);
     if (t) CloseHandle(t);
     else InterlockedExchange(&g_task_busy, 0);
 }

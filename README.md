@@ -1,95 +1,55 @@
-<h1><img src="res/logo.png" alt="" width="34" align="top"> MixBooster</h1>
+<p align="center">
+  <img src="docs/screens/components.png" alt="MixBooster" width="860">
+</p>
 
-PC tuning for Windows 10 and 11. One native exe in C, no frameworks; the same renderer as MixLauncher
-(Direct3D 11, DirectComposition, DirectWrite, Mica).
+<h1 align="center"><img src="docs/logo.png" alt="" width="34" align="top"> MixBooster</h1>
 
-## GPU Affinity
+<p align="center">
+  PC tuning for gaming on Windows 10 and 11.
+</p>
 
-Finds the CPU core that handles the GPU's interrupts best and keeps the GPU on it.
+<p align="center">
+  <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0b0b0d?style=flat-square" alt="Windows 10 | 11">
+  <img src="https://img.shields.io/badge/one%20exe-~4.9%20MB-0b0b0d?style=flat-square" alt="One exe, ~4.9 MB">
+  <img src="https://img.shields.io/badge/C-no%20frameworks-0b0b0d?style=flat-square" alt="C, no frameworks">
+  <img src="https://img.shields.io/badge/no%20telemetry-0b0b0d?style=flat-square" alt="No telemetry">
+</p>
 
-1. **Test.** Pick 1 to 8 runs and press *Start test*. For every logical processor the GPU interrupts are pinned to it,
-   the driver is restarted, the liblava triangle demo runs fullscreen (30 s warm-up) and PresentMon records 90 s of
-   frame times. This is the AutoGpuAffinity method; the screen flickers on each driver restart.
-2. **Results.** The table has an *AVG* tab (the mean over all runs) and a tab per run: average, max and min FPS,
-   1% / 0.1% / 0.01% lows, 1% / 0.1% percentiles and the frame time STDEV. The best value of each column is green.
-3. **Bind.** The two best cores are shown next to the test controls, the best one selected. *Bind the GPU* pins the
-   GPU (applied at once, by restarting its driver) and the PCI bridge it is attached to (applied after a reboot) to that
-   core, and installs the **MixBooster GPU Affinity** service.
+## Features
 
-The service (`MixBooster.exe --service`, copied to `Program Files\MixBooster`) checks the binding at startup and every
-time a display adapter arrives. A driver install or update recreates the device's registry key; the service writes the
-policy back and restarts the GPU driver. *Reset* removes the service and the policy.
+- **GPU Affinity.** Tests every CPU core with the GPU's interrupts on it and binds the GPU to the steadiest one.
+- **MSI Mode.** MSI and interrupt priority for every PCI device, in one table.
+- **Core parking.** Power plans, parking and processor state, with every core shown live; adds the MixBoost Low Latency plan.
+- **Graphics.** HAGS, MPO, VRR, windowed and fullscreen optimizations in one place.
+- **Game fixes.** CPU 0 off with High CPU and GPU priority for each game; finds Steam, Epic, Riot and Battle.net games and works with Process Lasso.
+- **PC components and health.** A gaming score for the PC, drive health, memory, drivers, BSODs and WHEA errors.
+- **Kept after driver updates.** A small service puts the GPU core, the MSI settings and the game fixes back.
+- **No AI, no telemetry.**
 
-The ranking: in every run on its own, every metric as the core's distance from that run's median core (capped at 15%), weighted: 1% low 22, 0.1% low 18,
-1% percentile 12, average 12, 0.01% low 10, 0.1% percentile 10, STDEV 10, min 4, max 2. A core's score is the median of its run
-scores minus their spread, so a core that is good in every run beats one that is the best only now and then. CPU 0 is never suggested, and
-binding to it by hand asks first: Windows handles most of its own interrupts there.
+## Screenshots
 
-Data lives in `%ProgramData%\MixBooster` (`gpu-affinity.txt`, `log.txt`, the unpacked tools in `bin`).
-The binding is in `HKLM\SOFTWARE\MixBooster` (`GpuMask`).
-
-## MSI Mode
-
-The PCI devices with an interrupt, grouped like MSI_util v3: what each supports (MSI-X, MSI, line-based IRQ), what it
-runs on now, a switch for MSI (`MessageSignaledInterruptProperties\MSISupported`) and the interrupt priority
-(`Affinity Policy\DevicePriority`). Edits wait for *Apply* and take effect after a restart; changing a disk controller
-asks first, since a controller that fails to start can keep Windows from booting.
-
-What *Apply* changes is kept in `HKLM\SOFTWARE\MixBooster\Msi` with the values that were there before. The same service
-writes the wanted values back when a driver install drops them (it watches every device arrival), and *Reset all* puts
-the old values back. The service stays installed while it keeps either the GPU core or MSI settings, and is removed
-when neither is left, whichever is reset last.
-
-When the MixBoost playbook's `MixBoost MSI Mode` task is there, the first *Apply* adopts the values it set and removes the
-task, so only one keeper is left; *Reset all* registers the task again with the playbook's `setMsiMode.ps1`.
-
-## Core parking
-
-What ParkControl does. The power plans, with a button to turn one on; for the chosen plan, core parking (min cores
-kept unparked, `CPMINCORES`, and on hybrid CPUs the P-cores' `CPMINCORES1` apart), the minimum and maximum
-processor state, plugged in and on battery. Changes go straight into the plan through powrprof and apply at once
-on the active one. Under them, every logical processor live: asleep or not, load, clock (performance counters).
-
-Where the MixBoost playbook's plan, *MixBoost Low Latency (HP)* (`11111111-1111-1111-1111-111111111111`), is
-missing, *Add the MixBoost plan* makes it the way `setPowerPlan.ps1` does: a copy of Ultimate Performance (else
-High performance, else Balanced) under that GUID with Hybred's Low Latency values, skipping the ones the Windows build
-doesn't have, and turns it on.
-
-## Graphics
-
-Switches for HAGS (`GraphicsDrivers\HwSchMode`, with what the GPU supports and runs now from D3DKMT), MPO
-(`Dwm\OverlayTestMode = 5` and, for 24H2, `GraphicsDrivers\DisableOverlays`), variable refresh rate and windowed-game
-optimizations (`DirectXUserGlobalSettings`, as Settings writes it) and fullscreen optimizations
-(`GameConfigStore\GameDVR_*`). They apply on a click; MPO and FSO keep what was there before in
-`HKLM\SOFTWARE\MixBooster\Gfx`, so turning them back on restores it.
-
-## Restart needed
-
-A card in the sidebar, on every page, while something waits for a restart: MSI Mode, the GPU's PCIe port, HAGS, MPO,
-or Windows Update. Each change leaves a mark in `HKLM\SOFTWARE\MixBooster\Reboot` with the boot it was made in; a
-mark from an earlier boot is dropped. The card opens the restart dialog.
-
-## PC health
-
-Drives (NVMe health log, SMART), battery, memory, drivers, stability over 30 days and device problems. Memory: the
-speed against the modules' rating, read from the part number for the gaming brands (an XMP / EXPO kit far below it
-has its profile off), single channel, mixed modules, and the last Windows Memory Diagnostic result. Drivers: each
-GPU driver's age (a warning after 6 months, 12 for an integrated GPU), and whether the chipset has AMD's or Intel's
-driver or only Windows' own.
+<table>
+  <tr>
+    <td align="center"><img src="docs/screens/affinity.png" alt="GPU Affinity" width="420"><br>GPU Affinity</td>
+    <td align="center"><img src="docs/screens/games.png" alt="Game fixes" width="420"><br>Game fixes</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screens/msi.png" alt="MSI Mode" width="420"><br>MSI Mode</td>
+    <td align="center"><img src="docs/screens/parking.png" alt="Core parking" width="420"><br>Core parking</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screens/graphics.png" alt="Graphics" width="420"><br>Graphics</td>
+    <td align="center"><img src="docs/screens/health.png" alt="PC health" width="420"><br>PC health</td>
+  </tr>
+</table>
 
 ## Build
 
 ```
-build.bat          release -> build\MixBooster.exe (asks for administrator rights)
+build.bat          release -> build\MixBooster.exe (runs as administrator)
 build.bat dev      no elevation prompt, for working on the UI
-build.bat debug
 ```
 
-MSVC (found through vswhere) or MinGW-w64 gcc/clang. `tools/make-icon.py` draws the icon (needs Pillow).
+MSVC or MinGW-w64. How each page works and what it changes: [docs/how-it-works.md](docs/how-it-works.md).
 
-## Third-party
-
-Packed into the exe and unpacked on first use:
-
-- [liblava](https://github.com/liblava/liblava) `lava-triangle.exe`, MIT, `third_party/liblava/LICENSE.txt`
-- [PresentMon](https://github.com/GameTechDev/PresentMon) 1.8.0, MIT, `third_party/presentmon/LICENSE.txt`
+Bundled: [liblava](https://github.com/liblava/liblava) and [PresentMon](https://github.com/GameTechDev/PresentMon), both MIT.

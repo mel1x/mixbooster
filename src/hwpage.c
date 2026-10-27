@@ -4,7 +4,7 @@
 #define HW_TOP 88.f        // the page content starts under the title, in DIPs
 #define HW_ROW_H 34.f
 #define HW_HEAD_H 86.f
-#define HW_SCORE_H 224.f
+#define HW_SCORE_H 248.f
 
 // Light green into the app's accent, along the gauge (0..1).
 static u32 score_color(f32 p)
@@ -75,7 +75,7 @@ static void draw_hw_score(const Box *b)
         { 0xF211, L"Видеокарта", L"Graphics" }, { 0xEEA1, L"Процессор", L"Processor" },
         { 0xE964, L"Память", L"Memory" },       { 0xEDA2, L"Системный диск", L"System drive" },
     };
-    f32 gap = S(10), cw = floorf((x1 - x - gap) * 0.5f), ch = S(58), gy = b->y + b->h - S(20) - ch * 2 - gap;
+    f32 gap = S(10), cw = floorf((x1 - x - gap) * 0.5f), ch = S(68), gy = b->y + b->h - S(20) - ch * 2 - gap;
     for (int i = 0; i < SC__COUNT; i++) {
         Box tb = { x + (cw + gap) * (f32)(i % 2), gy + (ch + gap) * (f32)(i / 2), cw, ch };
         r_rect(tb.x, tb.y, tb.w, tb.h, c->ctl, S(8));
@@ -84,10 +84,14 @@ static void draw_hw_score(const Box *b)
         f32 tx = tb.x + S(12) + isz + S(12), tr = tb.x + tb.w - S(14), pv2 = (f32)HW.d.score_part[i] * k;
         wfmt(num, countof(num), L"%d", (int)(pv2 + 0.5f));
         f32 nw = text_width(FONT_TEXT_SEMIBOLD, SC(17), num, -1);
-        text_draw_fit(FONT_TEXT, SC(12.5f), tx, baseline_for(FONT_TEXT, SC(12.5f), tb.y + S(21)), tr - tx - nw - S(8), g_lang_ru ? parts[i].ru : parts[i].en,
+        // the part, its score, and under them what it is: the name cut with an ellipsis when long
+        text_draw_fit(FONT_TEXT, SC(12), tx, baseline_for(FONT_TEXT, SC(12), tb.y + S(18)), tr - tx - nw - S(8), g_lang_ru ? parts[i].ru : parts[i].en,
                       -1, t->dim, false);
         text_right(FONT_TEXT_SEMIBOLD, SC(17), tr, tb.y + S(20), num, t->text);
-        f32 bw = tr - tx, by = tb.y + S(39);
+        const WCHAR *nm = HW.d.score_name[i];
+        text_draw_fit(FONT_TEXT_SEMIBOLD, SC(12.5f), tx, baseline_for(FONT_TEXT_SEMIBOLD, SC(12.5f), tb.y + S(37)), tr - tx - nw - S(8),
+                      nm[0] ? nm : TR("Не определено", "Unknown"), -1, nm[0] ? t->text : t->faint, false);
+        f32 bw = tr - tx, by = tb.y + S(52);
         r_rect(tx, by, bw, S(5), track, S(2.5f));
         if (pv2 > 0.5f) r_rect(tx, by, MAX(S(5), floorf(bw * pv2 / 100.f)), S(5), t->accent, S(2.5f));
     }
@@ -159,7 +163,7 @@ static void draw_skel_score(const Box *b)
     skel(x, y - S(4), S(120), S(16), S(8));
     skel(x, y + S(24), floorf((x1 - x) * 0.8f), S(10), S(5));
     skel(x, y + S(42), floorf((x1 - x) * 0.5f), S(10), S(5));
-    f32 gap = S(10), cw = floorf((x1 - x - gap) * 0.5f), ch = S(58), gy = b->y + b->h - S(20) - ch * 2 - gap;
+    f32 gap = S(10), cw = floorf((x1 - x - gap) * 0.5f), ch = S(68), gy = b->y + b->h - S(20) - ch * 2 - gap;
     for (int i = 0; i < 4; i++) skel(x + (cw + gap) * (f32)(i % 2), gy + (ch + gap) * (f32)(i / 2), cw, ch, S(8));
 }
 

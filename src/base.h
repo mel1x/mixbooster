@@ -38,6 +38,7 @@
 #include <dxgi1_3.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
+#include <commdlg.h>
 #include <dbt.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -59,6 +60,7 @@
 #pragma comment(lib, "uuid")
 #pragma comment(lib, "setupapi")
 #pragma comment(lib, "cfgmgr32")
+#pragma comment(lib, "comdlg32")
 #endif
 
 #include "../res/version.h"
@@ -363,4 +365,6 @@ enum {
     WM_APP_HW,                  // the PC components are read
     WM_APP_HEALTH,              // the PC health is read
     WM_APP_MSI_DONE,            // MSI settings applied or reset; wp = 1 on success
+    WM_APP_GAME_DONE,           // the service put in or removed for the game fixes; wp = 1 on success
+    WM_APP_JOB_DONE,            // a switch's job ran; lp = the Job
 };

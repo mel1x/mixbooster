@@ -14,6 +14,7 @@ static struct {
     u64 vram, ram;
     int ram_type, ram_speed;      // SMBIOS memory type, MT/s
     int sys_disk;                 // 0 unknown, 1 HDD, 2 SATA SSD, 3 NVMe
+    WCHAR sys_disk_name[96];
     bool gpu_integrated;
     // the result
     int part[SC__COUNT], total;

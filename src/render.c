@@ -134,6 +134,7 @@ typedef struct Renderer {
 } Renderer;
 
 static Renderer R;
+static int g_r_gen;  // counts device creations: textures uploaded by hand are lost with the old device
 
 static const char k_shader_src[] =
     "cbuffer C : register(b0) { float4 vp; float4 gamma; float4 misc; };\n"
@@ -455,6 +456,7 @@ static bool r_init(HWND hwnd, int w, int h)
         R.inst = (RInst *)malloc(sizeof(RInst) * R.cap);
     }
     R.ok = true;
+    g_r_gen++;
     return true;
 }
 

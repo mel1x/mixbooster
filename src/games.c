@@ -16,7 +16,7 @@
 
 #define GM_KEY MB_REG_KEY L"\\Games"
 #define GM_IFEO_KEY L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options"
-#define GM_MAX 48
+#define GM_MAX 256
 
 typedef struct KnownGame {
     const WCHAR *name, *exe;
@@ -48,6 +48,42 @@ static const KnownGame k_games[] = {
     { L"War Thunder", L"aces.exe", L"War Thunder\\win64\\aces.exe", L"War Thunder", L"win64\\aces.exe" },
     { L"World of Tanks", L"WorldOfTanks.exe", NULL, L"World of Tanks", L"win64\\WorldOfTanks.exe" },
     { L"Мир танков", L"WorldOfTanks.exe", NULL, L"Мир танков", L"win64\\WorldOfTanks.exe" },
+    { L"Battlefield 2042", L"BF2042.exe", L"Battlefield 2042\\BF2042.exe", L"Battlefield 2042", L"BF2042.exe" },
+    { L"Battlefield V", L"bfv.exe", L"Battlefield V\\bfv.exe", L"Battlefield V", L"bfv.exe" },
+    { L"Halo Infinite", L"HaloInfinite.exe", L"Halo Infinite\\HaloInfinite.exe", NULL, NULL },
+    { L"Destiny 2", L"destiny2.exe", L"Destiny 2\\destiny2.exe", NULL, NULL },
+    { L"Warframe", L"Warframe.x64.exe", L"Warframe\\Warframe.x64.exe", NULL, NULL },
+    { L"Helldivers 2", L"helldivers2.exe", L"Helldivers 2\\bin\\helldivers2.exe", NULL, NULL },
+    { L"Delta Force", L"DeltaForceClient-Win64-Shipping.exe", NULL, NULL, NULL },
+    { L"Squad", L"SquadGame.exe", L"Squad\\Squad\\Binaries\\Win64\\SquadGame.exe", NULL, NULL },
+    { L"Hell Let Loose", L"HLL-Win64-Shipping.exe", L"Hell Let Loose\\HLL\\Binaries\\Win64\\HLL-Win64-Shipping.exe", NULL, NULL },
+    { L"Insurgency: Sandstorm", L"InsurgencyClient-Win64-Shipping.exe", L"sandstorm\\Insurgency\\Binaries\\Win64\\InsurgencyClient-Win64-Shipping.exe", NULL, NULL },
+    { L"Arma Reforger", L"ArmaReforgerSteam.exe", L"Arma Reforger\\ArmaReforgerSteam.exe", NULL, NULL },
+    { L"DayZ", L"DayZ_x64.exe", L"DayZ\\DayZ_x64.exe", NULL, NULL },
+    { L"Left 4 Dead 2", L"left4dead2.exe", L"Left 4 Dead 2\\left4dead2.exe", NULL, NULL },
+    { L"Dead by Daylight", L"DeadByDaylight-Win64-Shipping.exe", L"Dead by Daylight\\DeadByDaylight\\Binaries\\Win64\\DeadByDaylight-Win64-Shipping.exe", NULL, NULL },
+    { L"Brawlhalla", L"Brawlhalla.exe", L"Brawlhalla\\Brawlhalla.exe", NULL, NULL },
+    { L"Fall Guys", L"FallGuys_client_game.exe", NULL, NULL, NULL },
+    { L"Roblox", L"RobloxPlayerBeta.exe", NULL, NULL, NULL },
+    { L"Minecraft for Windows", L"Minecraft.Windows.exe", NULL, NULL, NULL },
+    { L"osu!", L"osu!.exe", NULL, NULL, NULL },
+    { L"World of Warcraft", L"Wow.exe", NULL, L"World of Warcraft", L"_retail_\\Wow.exe" },
+    { L"Diablo IV", L"Diablo IV.exe", L"Diablo IV\\Diablo IV.exe", L"Diablo IV", L"Diablo IV.exe" },
+    { L"Lost Ark", L"LOSTARK.exe", L"Lost Ark\\Binaries\\Win64\\LOSTARK.exe", NULL, NULL },
+    { L"Genshin Impact", L"GenshinImpact.exe", NULL, L"Genshin Impact", L"Genshin Impact Game\\GenshinImpact.exe" },
+    { L"Honkai: Star Rail", L"StarRail.exe", NULL, NULL, NULL },
+    { L"Zenless Zone Zero", L"ZenlessZoneZero.exe", NULL, NULL, NULL },
+    { L"Elden Ring", L"eldenring.exe", L"ELDEN RING\\Game\\eldenring.exe", NULL, NULL },
+    { L"Cyberpunk 2077", L"Cyberpunk2077.exe", L"Cyberpunk 2077\\bin\\x64\\Cyberpunk2077.exe", NULL, NULL },
+    { L"Red Dead Redemption 2", L"RDR2.exe", L"Red Dead Redemption 2\\RDR2.exe", NULL, NULL },
+    { L"Baldur's Gate 3", L"bg3_dx11.exe", L"Baldurs Gate 3\\bin\\bg3_dx11.exe", NULL, NULL },
+    { L"Baldur's Gate 3 (Vulkan)", L"bg3.exe", L"Baldurs Gate 3\\bin\\bg3.exe", NULL, NULL },
+    { L"Monster Hunter Wilds", L"MonsterHunterWilds.exe", L"MonsterHunterWilds\\MonsterHunterWilds.exe", NULL, NULL },
+    { L"Palworld", L"Palworld-Win64-Shipping.exe", L"Palworld\\Pal\\Binaries\\Win64\\Palworld-Win64-Shipping.exe", NULL, NULL },
+    { L"Valheim", L"valheim.exe", L"Valheim\\valheim.exe", NULL, NULL },
+    { L"Forza Horizon 5", L"ForzaHorizon5.exe", L"ForzaHorizon5\\ForzaHorizon5.exe", NULL, NULL },
+    { L"Assetto Corsa Competizione", L"AC2-Win64-Shipping.exe", L"Assetto Corsa Competizione\\AC2\\Binaries\\Win64\\AC2-Win64-Shipping.exe", NULL, NULL },
+    { L"Euro Truck Simulator 2", L"eurotrucks2.exe", L"Euro Truck Simulator 2\\bin\\win_x64\\eurotrucks2.exe", NULL, NULL },
 };
 
 typedef struct Game {

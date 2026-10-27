@@ -70,6 +70,7 @@ enum {
     HT_GMTOG,     // the Game fixes page; idx: the game
     HT_GMDEL,     // idx: the game added by hand
     HT_GMADD,
+    HT_GMPAGE,    // the pages under the game list; idx: the page, GMP_PREV or GMP_NEXT
 };
 
 // Hover animation slots.
@@ -2193,7 +2194,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             int t = A.hover.type;
             bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET || t == HT_MOK ||
                         t == HT_MCANCEL || t == HT_DONATE || t == HT_LANG || t == HT_MANUAL || t == HT_PKCELL || t == HT_PKBEST ||
-                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || t == HT_TABPLUS || t == HT_RERUN || (t >= HT_MSITOG && t <= HT_MSIREBOOT && t != HT_MSIDDPANEL && t != HT_MSIDDOUT) || (t >= HT_GFXTOG && t <= HT_REBOOT) || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
+                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || t == HT_TABPLUS || t == HT_RERUN || (t >= HT_MSITOG && t <= HT_MSIREBOOT && t != HT_MSIDDPANEL && t != HT_MSIDDOUT) || (t >= HT_GFXTOG && t <= HT_REBOOT) || t == HT_GMPAGE || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
             SetCursor(LoadCursorW(NULL, hand ? (LPCWSTR)IDC_HAND : (LPCWSTR)IDC_ARROW));
             return TRUE;
         }

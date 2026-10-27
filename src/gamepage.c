@@ -3,7 +3,11 @@
 // applies on a click; the service or Process Lasso keeps it for later starts.
 
 #define GM_ROW_H 68.f
-#define GM_ICON_SLOT 96   // px, an icon's cell in the renderer's icon atlas; the atlas holds GM_MAX of them
+#define GM_ICON_SLOT 96   // px, an icon's cell in the renderer's icon atlas, a cell per row of a page
+#define GM_PAGE 24        // games on a page of the list
+#define GM_SLOTS ((ICON_ATLAS / GM_ICON_SLOT) * (ICON_ATLAS / GM_ICON_SLOT))
+
+enum { GMP_PREV = -1, GMP_NEXT = -2 };
 
 enum { LS_NONE, LS_IDLE, LS_RUNNING };
 
@@ -16,6 +20,11 @@ static struct {
     int seq[GM_MAX], pend;  // clicks per game, and jobs not done: the list is read again only once they are
     bool rescan;            // a game was added or removed: read the list when the jobs are done
     int ico[GM_MAX];       // the icon's size in the atlas: 0 not read yet, -1 none
+    int slot_of[GM_SLOTS]; // which game's icon an atlas cell holds now, + 1 (0 none)
+    int page;              // the page of the list shown
+    int npg;               // how many page buttons there are now
+    Box pg_prev, pg_next, pg[16];
+    f32 pg_t;              // 0..1, the rows of a newly opened page coming in
     int ico_gen;           // the renderer device the icons were uploaded to
     WCHAR note[160];
     bool note_bad;
@@ -186,24 +195,33 @@ static bool exe_icon(const WCHAR *path, int px, u32 *out)
     return ok;
 }
 
-// Loads the icons not read yet into the atlas, at the size they are drawn (read again when the DPI or the device
-// changes).
+// The list in pages of GM_PAGE games: how many, and the games of the page shown.
+static int gm_npages(void) { return MAX(1, (GM.n + GM_PAGE - 1) / GM_PAGE); }
+static int gm_first(void) { return GM.page * GM_PAGE; }
+static int gm_last(void) { return MIN(GM.n, gm_first() + GM_PAGE); }
+
+// Loads the icons of the page shown into the atlas, a cell per row, at the size they are drawn (read again when the
+// DPI, the device or the page changes: another page's game may have the cell now).
 static void gm_icons(int px)
 {
     px = MIN(px, GM_ICON_SLOT);
     if (GM.ico_gen != g_r_gen) {
         GM.ico_gen = g_r_gen;
         for (int i = 0; i < GM.n; i++) GM.ico[i] = 0;
+        memset(GM.slot_of, 0, sizeof GM.slot_of);
     }
     static u32 buf[GM_ICON_SLOT * GM_ICON_SLOT];
     int per = ICON_ATLAS / GM_ICON_SLOT;
-    for (int i = 0; i < GM.n && i < per * per; i++) {
+    for (int i = gm_first(); i < gm_last(); i++) {
+        int slot = i - gm_first();
+        if (GM.ico[i] > 0 && GM.slot_of[slot] != i + 1) GM.ico[i] = 0;
         if (GM.ico[i] == px || GM.ico[i] < 0) continue;
         if (!GM.list[i].path[0] || !exe_icon(GM.list[i].path, px, buf)) {
             GM.ico[i] = -1;
             continue;
         }
-        r_upload_icon((i % per) * GM_ICON_SLOT, (i / per) * GM_ICON_SLOT, px, buf);
+        r_upload_icon((slot % per) * GM_ICON_SLOT, (slot / per) * GM_ICON_SLOT, px, buf);
+        GM.slot_of[slot] = i + 1;
         GM.ico[i] = px;
     }
 }
@@ -211,9 +229,9 @@ static void gm_icons(int px)
 static void gm_draw_icon(int i, f32 x, f32 y, f32 sz)
 {
     const Theme *t = &A.th;
-    int per = ICON_ATLAS / GM_ICON_SLOT;
+    int per = ICON_ATLAS / GM_ICON_SLOT, slot = i - gm_first();
     if (GM.ico[i] > 0) {
-        f32 u = (f32)((i % per) * GM_ICON_SLOT) / ICON_ATLAS, v = (f32)((i / per) * GM_ICON_SLOT) / ICON_ATLAS, d = (f32)GM.ico[i] / ICON_ATLAS;
+        f32 u = (f32)((slot % per) * GM_ICON_SLOT) / ICON_ATLAS, v = (f32)((slot / per) * GM_ICON_SLOT) / ICON_ATLAS, d = (f32)GM.ico[i] / ICON_ATLAS;
         r_icon(x, y, sz, sz, u, v, u + d, v + d, 1.f);
         return;
     }
@@ -285,13 +303,26 @@ static void gm_layout(void)
     GM.add = (Box){ x0 + cw - bw, GM.sec_y, bw, S(34) };
 
     f32 ly = GM.sec_y + S(46);
-    for (int i = 0; i < GM.n; i++) {
-        GM.rows[i] = (Box){ x0 + S(6), ly + S(6) + S(GM_ROW_H) * (f32)i, cw - S(12), S(GM_ROW_H) };
+    GM.page = CLAMP(GM.page, 0, gm_npages() - 1);
+    int first = gm_first(), last = gm_last();
+    for (int i = first; i < last; i++) {
+        GM.rows[i] = (Box){ x0 + S(6), ly + S(6) + S(GM_ROW_H) * (f32)(i - first), cw - S(12), S(GM_ROW_H) };
         GM.sw[i] = (Box){ x0 + cw - S(22) - S(52), GM.rows[i].y + (S(GM_ROW_H) - S(32)) * 0.5f, S(52), S(32) };
         GM.del[i] = GM.list[i].custom ? (Box){ GM.sw[i].x - S(10) - S(32), GM.rows[i].y + (S(GM_ROW_H) - S(32)) * 0.5f, S(32), S(32) } : (Box){ 0 };
     }
-    GM.list_card = (Box){ x0, ly, cw, GM.n ? S(GM_ROW_H) * (f32)GM.n + S(12) : S(150) };
-    GM.content_h = GM.list_card.y + GM.list_card.h - y + (GM.note[0] ? S(48) : S(16));
+    GM.list_card = (Box){ x0, ly, cw, GM.n ? S(GM_ROW_H) * (f32)(last - first) + S(12) : S(150) };
+    f32 bottom = GM.list_card.y + GM.list_card.h;
+
+    // more than a page: the pages under the list, centered: back, a button per page, forward
+    GM.npg = gm_npages() > 1 ? MIN(gm_npages(), countof(GM.pg)) : 0;
+    if (GM.npg) {
+        f32 bs = S(34), gap = S(6), w = bs * (f32)(GM.npg + 2) + gap * (f32)(GM.npg + 1), px = floorf(x0 + (cw - w) * 0.5f), py = bottom + S(14);
+        GM.pg_prev = (Box){ px, py, bs, bs };
+        for (int k = 0; k < GM.npg; k++) GM.pg[k] = (Box){ px + (bs + gap) * (f32)(k + 1), py, bs, bs };
+        GM.pg_next = (Box){ px + (bs + gap) * (f32)(GM.npg + 1), py, bs, bs };
+        bottom = py + bs;
+    }
+    GM.content_h = bottom - y + (GM.note[0] ? S(48) : S(16));
 }
 
 static void gm_card(const Box *b)
@@ -344,6 +375,53 @@ static void draw_gm_hero(void)
     }
 }
 
+// A button of the pages: a number, or an arrow (glyph); the page shown is on an accent plate.
+static void gm_page_btn(const Box *b, int idx, const WCHAR *label, u32 glyph, bool sel, bool off)
+{
+    const Theme *t = &A.th;
+    const Colors *c = &A.c;
+    bool hov = !off && !sel && A.hover.type == HT_GMPAGE && A.hover.idx == idx;
+    f32 hk = hover_amt(b, hov);
+    RXf xf = press_push(b, off ? 0.f : press_amt(b, hov && A.press.type == HT_GMPAGE && A.press.idx == idx));
+    u32 bg = sel ? color_alpha(t->accent, t->dark ? 0.2f : 0.16f) : color_alpha(c->ctl_hover, hk);
+    r_rect(b->x, b->y, b->w, b->h, bg, S(8));
+    f32 cx = b->x + b->w * 0.5f, cy = b->y + b->h * 0.5f;
+    u32 fg = off ? t->faint : sel ? t->accent : color_mix(t->dim, t->text, hk);
+    if (glyph) text_draw_icon(glyph, SC(11), cx, cy, fg);
+    else text_center(sel ? FONT_TEXT_SEMIBOLD : FONT_TEXT, SC(13), cx, cy, label, fg);
+    r_xf_pop(xf);
+}
+
+static void draw_gm_pages(void)
+{
+    const Theme *t = &A.th;
+    int np = gm_npages();
+    gm_page_btn(&GM.pg_prev, GMP_PREV, NULL, 0xE76B, false, GM.page == 0);
+    for (int k = 0; k < GM.npg; k++) {
+        WCHAR num[8];
+        wfmt(num, countof(num), L"%d", k + 1);
+        gm_page_btn(&GM.pg[k], k, num, 0, k == GM.page, false);
+    }
+    gm_page_btn(&GM.pg_next, GMP_NEXT, NULL, 0xE76C, false, GM.page >= np - 1);
+    // which games are shown, at the left
+    WCHAR rng[64];
+    wfmt(rng, countof(rng), TR("%d-%d из %d", "%d-%d of %d"), gm_first() + 1, gm_last(), GM.n);
+    text_draw(FONT_TEXT, SC(12.5f), GM.list_card.x + S(4), baseline_for(FONT_TEXT, SC(12.5f), GM.pg_prev.y + GM.pg_prev.h * 0.5f), rng, -1, t->faint);
+}
+
+static void gm_set_page(int p)
+{
+    p = CLAMP(p, 0, gm_npages() - 1);
+    if (p == GM.page) return;
+    GM.page = p;
+    GM.pg_t = g_reduced_motion ? 1.f : 0.f;
+    // back up to the top of the list when it is scrolled past
+    f32 top = GM.hero_h + S(22);
+    if (GM.scroll_target > top) GM.scroll_target = top;
+    A.hover.type = HT_NONE;
+    invalidate();
+}
+
 static void draw_gm_list(void)
 {
     const Theme *t = &A.th;
@@ -371,14 +449,20 @@ static void draw_gm_list(void)
     }
     f32 isz = S(36);
     gm_icons((int)isz);
-    for (int i = 0; i < GM.n; i++) {
+    int first = gm_first(), last = gm_last();
+    f32 base = R.opacity;
+    for (int i = first; i < last; i++) {
         const Game *g = &GM.list[i];
         Box *r = &GM.rows[i];
+        // a page just opened: its rows come in one after another
+        f32 kr = ease_out_cubic(GM.pg_t * 1.6f - 0.03f * (f32)(i - first));
+        R.opacity = base * kr;
+        RXf rxf = r_xf_push(1.f, 0, 0, 0, (1.f - kr) * S(8));
         bool hov = (A.hover.type == HT_GMTOG || A.hover.type == HT_GMDEL) && A.hover.idx == i;
-        f32 rh = hover_amt(r, hov), nh = i + 1 < GM.n ? hover_amt(&GM.rows[i + 1], (A.hover.type == HT_GMTOG || A.hover.type == HT_GMDEL) && A.hover.idx == i + 1) : 0.f;
+        f32 rh = hover_amt(r, hov), nh = i + 1 < last ? hover_amt(&GM.rows[i + 1], (A.hover.type == HT_GMTOG || A.hover.type == HT_GMDEL) && A.hover.idx == i + 1) : 0.f;
         if (rh > 0) r_rect(r->x, r->y + S(2), r->w, r->h - S(4), color_alpha(c->nav_hover, rh), S(8));
         // the line under a row gives way to the hover of either row next to it
-        if (i + 1 < GM.n) r_rect(r->x + S(16), r->y + r->h - 1, r->w - S(32), 1, color_alpha(t->sep, 0.7f * (1.f - MAX(rh, nh))), 0);
+        if (i + 1 < last) r_rect(r->x + S(16), r->y + r->h - 1, r->w - S(32), 1, color_alpha(t->sep, 0.7f * (1.f - MAX(rh, nh))), 0);
         f32 ry = r->y + r->h * 0.5f, ix = r->x + S(16), nx = ix + isz + S(14);
         f32 right = (g->custom ? GM.del[i].x : GM.sw[i].x) - S(16);
         gm_draw_icon(i, ix, ry - isz * 0.5f, isz);
@@ -425,7 +509,10 @@ static void draw_gm_list(void)
             r_xf_pop(dxf);
         }
         draw_switch(&GM.sw[i], GM.tog[i], true, A.hover.type == HT_GMTOG && A.hover.idx == i);
+        r_xf_pop(rxf);
     }
+    R.opacity = base;
+    if (GM.npg) draw_gm_pages();
 }
 
 static void draw_game_page(void)
@@ -437,7 +524,7 @@ static void draw_game_page(void)
     draw_gm_hero();
     draw_gm_list();
     if (GM.note[0]) {
-        f32 ny = GM.list_card.y + GM.list_card.h + S(24);
+        f32 ny = (GM.npg ? GM.pg_prev.y + GM.pg_prev.h : GM.list_card.y + GM.list_card.h) + S(24);
         text_draw_icon(0xE783, SC(13), GM.list_card.x + S(10), ny, t->danger);
         text_draw_fit(FONT_TEXT, SC(12.5f), GM.list_card.x + S(26), baseline_for(FONT_TEXT, SC(12.5f), ny), GM.list_card.w - S(26), GM.note, -1, t->danger,
                       false);
@@ -454,6 +541,10 @@ static bool gm_animate(f32 dt)
 {
     bool anim = false;
     for (int i = 0; i < GM.n; i++) anim |= spring(&GM.tog[i], &GM.togv[i], GM.list[i].on ? 1.f : 0.f, 0.34f, 0.7f, 0.002f, dt);
+    if (GM.pg_t < 1.f) {
+        GM.pg_t = MIN(1.f, GM.pg_t + dt / 0.45f);
+        anim = true;
+    }
     GM.scroll_target = CLAMP(GM.scroll_target, 0.f, gm_max_scroll());
     anim |= spring_step(&GM.scroll, &GM.scroll_v, GM.scroll_target, 24.f, dt);
     bool sb = A.page == PG_GAMES && gm_max_scroll() > 0 && A.mx >= content_x0();
@@ -466,7 +557,13 @@ static Hit gm_hit(f32 x, f32 y)
 {
     if (y < S(HW_TOP) - S(6)) return (Hit){ HT_NONE, -1 };
     if (in_b(&GM.add, x, y)) return (Hit){ HT_GMADD, -1 };
-    for (int i = 0; i < GM.n; i++) {
+    if (GM.npg) {
+        if (in_b(&GM.pg_prev, x, y)) return (Hit){ HT_GMPAGE, GMP_PREV };
+        if (in_b(&GM.pg_next, x, y)) return (Hit){ HT_GMPAGE, GMP_NEXT };
+        for (int k = 0; k < GM.npg; k++)
+            if (in_b(&GM.pg[k], x, y)) return (Hit){ HT_GMPAGE, k };
+    }
+    for (int i = gm_first(); i < gm_last(); i++) {
         if (GM.list[i].custom && in_b(&GM.del[i], x, y)) return (Hit){ HT_GMDEL, i };
         if (in_b(&GM.rows[i], x, y)) return (Hit){ HT_GMTOG, i };
     }
@@ -483,5 +580,6 @@ static void gm_click(Hit h)
     case HT_GMDEL:
         if (h.idx >= 0 && h.idx < GM.n) gm_remove(h.idx);
         break;
+    case HT_GMPAGE: gm_set_page(h.idx == GMP_PREV ? GM.page - 1 : h.idx == GMP_NEXT ? GM.page + 1 : h.idx); break;
     }
 }

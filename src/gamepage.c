@@ -1,6 +1,7 @@
-// The "Game fixes" page. One fix for now, "CPU 0 + High" (CPU and GPU priority): a card about the fix, then the games
-// found on this PC (games.c) with their own icons, a switch for each, and "Add a game" for any other exe. Each switch
-// applies on a click; the service or Process Lasso keeps it for later starts.
+// The "Game fixes" page: a card about the fixes, then the games found on this PC (games.c) with their own icons and
+// the fixes each has on, and "Add a game" for any other exe. A click on a game opens a dialog with a switch per fix
+// (only the ones this CPU gets); each switch applies on a click, and the service or Process Lasso keeps it for later
+// starts.
 
 #define GM_ROW_H 68.f
 #define GM_ICON_SLOT 96   // px, an icon's cell in the renderer's icon atlas, a cell per row of a page
@@ -16,7 +17,6 @@ static struct {
     Game list[GM_MAX];
     int n;
     int lasso;             // LS_*
-    f32 tog[GM_MAX], togv[GM_MAX];
     int seq[GM_MAX], pend;  // clicks per game, and jobs not done: the list is read again only once they are
     bool rescan;            // a game was added or removed: read the list when the jobs are done
     int ico[GM_MAX];       // the icon's size in the atlas: 0 not read yet, -1 none
@@ -29,9 +29,22 @@ static struct {
     WCHAR note[160];
     bool note_bad;
     f32 scroll, scroll_target, scroll_v, content_h, sb_t, hero_h;
-    Box hero, list_card, add, rows[GM_MAX], sw[GM_MAX], del[GM_MAX];
+    Box hero, list_card, add, rows[GM_MAX], del[GM_MAX];
     f32 sec_y;
-} GM;
+
+    // the game's dialog: which game (kept while it closes), its fixes top to bottom, the switches
+    int dlg;
+    bool dlg_open;
+    WCHAR dlg_exe[64];     // a game just added: its dialog opens once the list is read again
+    f32 dlg_t, dlg_v;
+    int dlg_fx[8], ndlg;
+    f32 ftog[8], ftogv[8];
+    Box dlg_panel, dlg_done, dlg_rows[8], dlg_sw[8];
+} GM = { .dlg = -1 };
+
+static void gm_dlg_show(int i);
+static void gm_set_page(int p);
+static int gm_fix_text(int fix, WCHAR *out, int cap);
 
 static void gm_read(void)
 {
@@ -41,20 +54,36 @@ static void gm_read(void)
     // Lasso put in or removed since: the service is needed or not any more
     if (lasso_sync()) games_svc_update(A.hwnd);
     GM.n = games_scan(GM.list);
-    for (int i = 0; i < GM.n; i++) {
-        GM.tog[i] = GM.list[i].on ? 1.f : 0.f;
-        GM.ico[i] = 0;
-    }
+    for (int i = 0; i < GM.n; i++) GM.ico[i] = 0;
     GM.ready = true;
+    // the game whose dialog is up, or was just added, may sit elsewhere in the new list
+    if (GM.dlg_exe[0]) {
+        int at = -1;
+        for (int i = 0; i < GM.n; i++)
+            if (!_wcsicmp(GM.list[i].exe, GM.dlg_exe)) at = i;
+        if (at < 0) {
+            GM.dlg_open = false;
+            GM.dlg = -1;
+        } else if (GM.dlg_open) {
+            GM.dlg = at;
+        } else {
+            GM.page = at / GM_PAGE;
+            gm_dlg_show(at);
+        }
+    }
 }
 
 // The jobs: a switch, a game added, a game removed. Once none is left the service is put in or removed as the games
 // now need it.
 static bool gm_set_run(Job *j)
 {
-    if (game_set(&j->u.game, j->on)) return true;
+    WCHAR exe[64];
+    exe_lower(exe, countof(exe), j->u.game.exe);
+    int was = gm_fix(exe);
+    if (game_set(&j->u.game, j->u.game.fix)) return true;
     // half made: back to how it was, as the switch goes back
-    game_set(&j->u.game, !j->on);
+    j->u.game.fix = was;
+    game_set(&j->u.game, was);
     return false;
 }
 
@@ -64,7 +93,7 @@ static void gm_job_done(Job *j, bool ok)
 {
     GM.pend--;
     if (!ok) {
-        if (j->idx >= 0 && j->idx < GM.n && j->seq == GM.seq[j->idx] && !_wcsicmp(GM.list[j->idx].exe, j->u.game.exe)) GM.list[j->idx].on = !j->on;
+        if (j->idx >= 0 && j->idx < GM.n && j->seq == GM.seq[j->idx] && !_wcsicmp(GM.list[j->idx].exe, j->u.game.exe)) GM.list[j->idx].fix = j->u.game.fix;
         toast_show(TR("Не удалось применить фикс к игре: подробности в log.txt", "Couldn't apply the fix to the game: details in log.txt"));
     }
     if (GM.pend) return;
@@ -75,23 +104,25 @@ static void gm_job_done(Job *j, bool ok)
     }
 }
 
-static void gm_post(int i, const Game *g, bool on, bool (*run)(Job *))
+static void gm_post(int i, const Game *g, bool (*run)(Job *))
 {
-    Job j = { run, gm_job_done, i, i >= 0 ? ++GM.seq[i] : 0, on };
+    Job j = { run, gm_job_done, i, i >= 0 ? ++GM.seq[i] : 0, false };
     j.u.game = *g;
     GM.pend++;
     job_post(A.hwnd, &j);
 }
 
-static void gm_toggle(int i)
+// One fix of the dialog's game, on or off.
+static void gm_fix_toggle(int k)
 {
-    Game *g = &GM.list[i];
-    g->on = !g->on;
+    if (GM.dlg < 0 || GM.dlg >= GM.n || k < 0 || k >= GM.ndlg) return;
+    Game *g = &GM.list[GM.dlg];
+    g->fix ^= GM.dlg_fx[k];
     GM.note[0] = 0;
-    gm_post(i, g, g->on, gm_set_run);
+    gm_post(GM.dlg, g, gm_set_run);
 }
 
-// "Add a game": any exe; a known one keeps its name.
+// "Add a game": any exe; a known one keeps its name. Its dialog opens to pick the fixes.
 static void gm_add(void)
 {
     WCHAR path[MAX_PATH] = L"";
@@ -108,7 +139,8 @@ static void gm_add(void)
         if (!_wcsicmp(GM.list[i].exe, exe)) {
             wcopy(GM.list[i].path, MAX_PATH, path);
             GM.ico[i] = 0;
-            if (!GM.list[i].on) gm_toggle(i);
+            gm_set_page(i / GM_PAGE);
+            gm_dlg_show(i);
             return;
         }
     Game g;
@@ -125,17 +157,16 @@ static void gm_add(void)
             g.custom = false;
         }
     GM.rescan = true;
-    gm_post(-1, &g, true, gm_set_run);
+    wcopy(GM.dlg_exe, countof(GM.dlg_exe), g.exe);
+    gm_post(-1, &g, gm_set_run);
 }
 
 static void gm_remove(int i)
 {
     GM.rescan = true;
-    gm_post(-1, &GM.list[i], false, gm_forget_run);
+    gm_post(-1, &GM.list[i], gm_forget_run);
     // gone from the list at once; the list is read again when the job is done
     memmove(&GM.list[i], &GM.list[i + 1], sizeof(Game) * (size_t)(GM.n - i - 1));
-    memmove(&GM.tog[i], &GM.tog[i + 1], sizeof(f32) * (size_t)(GM.n - i - 1));
-    memmove(&GM.togv[i], &GM.togv[i + 1], sizeof(f32) * (size_t)(GM.n - i - 1));
     memmove(&GM.seq[i], &GM.seq[i + 1], sizeof(int) * (size_t)(GM.n - i - 1));
     GM.n--;
     // an icon's atlas cell goes by its index: the ones that moved up are read again
@@ -151,8 +182,8 @@ static void gm_done(bool ok)
         return;
     }
     wcopy(GM.note, countof(GM.note),
-          TR("Служба MixBooster не запустилась: CPU 0 не будет сниматься при следующих запусках игр. Подробности в log.txt",
-             "The MixBooster service didn't start: CPU 0 won't be taken off on the next game starts. Details in log.txt"));
+          TR("Служба MixBooster не запустилась: фиксы не будут ставиться при следующих запусках игр. Подробности в log.txt",
+             "The MixBooster service didn't start: the fixes won't be set on the next game starts. Details in log.txt"));
     GM.note_bad = true;
 }
 
@@ -248,24 +279,18 @@ static f32 gm_max_scroll(void) { return MAX(0.f, GM.content_h - gm_view_h()); }
 
 static const WCHAR *gm_desc(void)
 {
-    return TR("Игра работает на всех потоках, кроме CPU 0, где Windows и драйверы обрабатывают большую часть прерываний, с высоким приоритетом процессора и видеокарты. Держится при каждом запуске игры.",
-              "The game runs on every CPU but CPU 0, where Windows and the drivers handle most interrupts, with High CPU and GPU priority. Kept on every start of the game.");
+    return TR("Нажмите на игру, чтобы выбрать её фиксы: приоритет, ядра процессора, энергосбережение. Фиксы для отдельных процессоров видны только на них. Всё держится при каждом запуске игры.",
+              "Click a game to pick its fixes: priority, CPU cores, power saving. The fixes for particular CPUs show only on them. All of it is kept on every start of the game.");
 }
 
-// The callouts under the explanation: a warning for small CPUs, and where Process Lasso stands.
+// The callouts under the explanation: where Process Lasso stands.
 static int gm_notes(const WCHAR **txt, u32 *col, u32 *glyph)
 {
     const Theme *t = &A.th;
     int n = 0;
-    if (A.cpu.count <= 4) {
-        txt[n] = TR("У процессора 4 потока или меньше: без CPU 0 игре останется 3 и меньше, FPS может упасть. Включайте, только если проверили разницу",
-                    "This CPU has 4 threads or fewer: without CPU 0 a game is left with 3 or fewer and can lose FPS. Turn it on only after checking the difference");
-        col[n] = t->warn;
-        glyph[n++] = 0xE7BA;
-    }
     if (GM.lasso == LS_RUNNING) {
-        txt[n] = TR("Process Lasso запущен: включённые игры держит он, служба MixBooster для них не нужна",
-                    "Process Lasso is running: it keeps the games turned on, the MixBooster service isn't needed for them");
+        txt[n] = TR("Process Lasso запущен: приоритет и ядра игр держит он, служба MixBooster для них не нужна",
+                    "Process Lasso is running: it keeps the games' priority and cores, the MixBooster service isn't needed for them");
         col[n] = t->good;
         glyph[n++] = 0xE73E;
     } else if (GM.lasso == LS_IDLE) {
@@ -280,7 +305,7 @@ static int gm_notes(const WCHAR **txt, u32 *col, u32 *glyph)
 static int gm_on_count(void)
 {
     int n = 0;
-    for (int i = 0; i < GM.n; i++) n += GM.list[i].on;
+    for (int i = 0; i < GM.n; i++) n += GM.list[i].fix != 0;
     return n;
 }
 
@@ -290,8 +315,8 @@ static void gm_layout(void)
     // the fix's card grows with the explanation's lines and the callouts under it
     f32 tx = x0 + S(24) + S(44) + S(16), tw = x0 + cw - S(24) - S(150) - tx;
     int lines = text_wrap(FONT_TEXT, SC(13), tx, 0, tw, S(18), gm_desc(), 0, false);
-    const WCHAR *nt[2];
-    u32 nc[2], ng[2];
+    const WCHAR *nt[1];
+    u32 nc[1], ng[1];
     int notes = gm_notes(nt, nc, ng);
     GM.hero_h = S(60) + S(18) * (f32)lines + S(20) + (notes ? S(44) * (f32)notes : 0);
     GM.hero = (Box){ x0, y, cw, GM.hero_h };
@@ -307,8 +332,7 @@ static void gm_layout(void)
     int first = gm_first(), last = gm_last();
     for (int i = first; i < last; i++) {
         GM.rows[i] = (Box){ x0 + S(6), ly + S(6) + S(GM_ROW_H) * (f32)(i - first), cw - S(12), S(GM_ROW_H) };
-        GM.sw[i] = (Box){ x0 + cw - S(22) - S(52), GM.rows[i].y + (S(GM_ROW_H) - S(32)) * 0.5f, S(52), S(32) };
-        GM.del[i] = GM.list[i].custom ? (Box){ GM.sw[i].x - S(10) - S(32), GM.rows[i].y + (S(GM_ROW_H) - S(32)) * 0.5f, S(32), S(32) } : (Box){ 0 };
+        GM.del[i] = GM.list[i].custom ? (Box){ x0 + cw - S(22) - S(32), GM.rows[i].y + (S(GM_ROW_H) - S(32)) * 0.5f, S(32), S(32) } : (Box){ 0 };
     }
     GM.list_card = (Box){ x0, ly, cw, GM.n ? S(GM_ROW_H) * (f32)(last - first) + S(12) : S(150) };
     f32 bottom = GM.list_card.y + GM.list_card.h;
@@ -348,7 +372,7 @@ static void draw_gm_hero(void)
     f32 isz = S(44), ix = b->x + S(24), tx = ix + isz + S(16), tw = b->x + b->w - S(24) - S(150) - tx;
     draw_icon_tile(ix, b->y + S(24), isz, 0xE7FC);
     text_draw_fit(FONT_TEXT_SEMIBOLD, SC(16), tx, baseline_for(FONT_TEXT_SEMIBOLD, SC(16), b->y + S(36)), tw,
-                  TR("CPU 0 + высокий приоритет CPU и GPU", "CPU 0 + High CPU and GPU priority"), -1, t->text, false);
+                  TR("Фиксы для игр", "Fixes for games"), -1, t->text, false);
     text_wrap(FONT_TEXT, SC(13), tx, baseline_for(FONT_TEXT, SC(13), b->y + S(62)), tw, S(18), gm_desc(), t->dim, true);
 
     // how many games have it, on the right
@@ -360,10 +384,10 @@ static void draw_gm_hero(void)
     f32 ow = text_width(FONT_DISPLAY, ofs, of, -1), nw = text_width(FONT_DISPLAY, nfs, num, -1);
     text_draw(FONT_DISPLAY, nfs, right - ow - nw, baseline_for(FONT_DISPLAY, nfs, ny), num, -1, on ? t->accent : t->text);
     text_draw(FONT_DISPLAY, ofs, right - ow, baseline_for(FONT_DISPLAY, nfs, ny), of, -1, t->faint);
-    text_right(FONT_TEXT, SC(12), right, ny + S(26), TR("игр с фиксом", "games with the fix"), t->faint);
+    text_right(FONT_TEXT, SC(12), right, ny + S(26), TR("игр с фиксами", "games with fixes"), t->faint);
 
-    const WCHAR *nt[2];
-    u32 nc[2], ng[2];
+    const WCHAR *nt[1];
+    u32 nc[1], ng[1];
     int notes = gm_notes(nt, nc, ng);
     for (int i = 0; i < notes; i++) {
         Box cb = { b->x + S(24), b->y + b->h - S(20) - S(36) - S(44) * (f32)(notes - 1 - i), b->w - S(48), S(36) };
@@ -458,13 +482,13 @@ static void draw_gm_list(void)
         f32 kr = ease_out_cubic(GM.pg_t * 1.6f - 0.03f * (f32)(i - first));
         R.opacity = base * kr;
         RXf rxf = r_xf_push(1.f, 0, 0, 0, (1.f - kr) * S(8));
-        bool hov = (A.hover.type == HT_GMTOG || A.hover.type == HT_GMDEL) && A.hover.idx == i;
-        f32 rh = hover_amt(r, hov), nh = i + 1 < last ? hover_amt(&GM.rows[i + 1], (A.hover.type == HT_GMTOG || A.hover.type == HT_GMDEL) && A.hover.idx == i + 1) : 0.f;
+        bool hov = (A.hover.type == HT_GMROW || A.hover.type == HT_GMDEL) && A.hover.idx == i;
+        f32 rh = hover_amt(r, hov), nh = i + 1 < last ? hover_amt(&GM.rows[i + 1], (A.hover.type == HT_GMROW || A.hover.type == HT_GMDEL) && A.hover.idx == i + 1) : 0.f;
         if (rh > 0) r_rect(r->x, r->y + S(2), r->w, r->h - S(4), color_alpha(c->nav_hover, rh), S(8));
         // the line under a row gives way to the hover of either row next to it
         if (i + 1 < last) r_rect(r->x + S(16), r->y + r->h - 1, r->w - S(32), 1, color_alpha(t->sep, 0.7f * (1.f - MAX(rh, nh))), 0);
         f32 ry = r->y + r->h * 0.5f, ix = r->x + S(16), nx = ix + isz + S(14);
-        f32 right = (g->custom ? GM.del[i].x : GM.sw[i].x) - S(16);
+        f32 right = (g->custom ? GM.del[i].x : r->x + r->w - S(16)) - S(16);
         gm_draw_icon(i, ix, ry - isz * 0.5f, isz);
 
         // the name, and what is true of it now
@@ -474,7 +498,7 @@ static void draw_gm_list(void)
         if (g->running) {
             const WCHAR *lbl = TR("запущена", "running");
             f32 pw = text_width(FONT_TEXT_SEMIBOLD, SC(11), lbl, -1) + S(22);
-            u32 pc = g->on ? t->good : t->dim;
+            u32 pc = g->fix ? t->good : t->dim;
             r_rect(px, ny - S(9), pw, S(18), color_alpha(pc, 0.16f), S(9));
             r_rect(px + S(8), ny - S(2.5f), S(5), S(5), pc, S(2.5f));
             text_draw(FONT_TEXT_SEMIBOLD, SC(11), px + S(16), baseline_for(FONT_TEXT_SEMIBOLD, SC(11), ny), lbl, -1, pc);
@@ -508,7 +532,13 @@ static void draw_gm_list(void)
             text_draw_icon(0xE74D, SC(13), d->x + d->w * 0.5f, d->y + d->h * 0.5f, color_mix(t->faint, t->danger, dk));
             r_xf_pop(dxf);
         }
-        draw_switch(&GM.sw[i], GM.tog[i], true, A.hover.type == HT_GMTOG && A.hover.idx == i);
+        // the fixes on, and the way into the dialog
+        WCHAR on[160];
+        u32 oc = g->fix ? t->accent : t->faint;
+        if (!gm_fix_text(g->fix, on, countof(on))) wcopy(on, countof(on), TR("нет фиксов", "no fixes"));
+        text_draw_icon(0xE76C, SC(11), right - S(4), ry, color_mix(t->faint, t->text, rh));
+        f32 ow = MIN(text_width(FONT_TEXT_SEMIBOLD, SC(12.5f), on, -1), S(260));
+        text_draw_fit(FONT_TEXT_SEMIBOLD, SC(12.5f), right - S(18) - ow, baseline_for(FONT_TEXT_SEMIBOLD, SC(12.5f), ry), ow, on, -1, oc, false);
         r_xf_pop(rxf);
     }
     R.opacity = base;
@@ -537,10 +567,188 @@ static void draw_game_page(void)
     }
 }
 
+// --- a game's fixes ------------------------------------------------------------------------------------------------
+
+static const struct {
+    int bit;
+    u32 glyph;
+    const WCHAR *ru, *en, *dru, *den, *sru, *sen;  // the name, what it does in a line, the short name in the list
+} k_fx[] = {
+    { FX_HIGH, 0xEC4A, L"Высокий приоритет CPU", L"High CPU priority", L"Windows запускает игру с высоким приоритетом процессора",
+      L"Windows starts the game with High CPU priority", L"CPU High", L"CPU High" },
+    { FX_GPU, 0xF211, L"Высокий приоритет GPU", L"High GPU priority", L"Видеокарта выполняет работу игры раньше фоновых программ",
+      L"The GPU runs the game's work ahead of background apps", L"GPU High", L"GPU High" },
+    { FX_CPU0, 0xEEA1, L"Без CPU 0", L"CPU 0 off", L"CPU 0 остаётся Windows и прерываниям драйверов",
+      L"CPU 0 is left to Windows and the drivers' interrupts", L"без CPU 0", L"no CPU 0" },
+    { FX_PCORES, 0xE950, L"Только P-ядра", L"P-cores only", L"Игра не попадает на медленные E-ядра",
+      L"The game stays off the slower E-cores", L"P-ядра", L"P-cores" },
+    { FX_VCACHE, 0xE964, L"Только CCD с 3D V-Cache", L"3D V-Cache CCD only", L"Игра работает только на кристалле с большим кэшем L3",
+      L"The game runs only on the die with the big L3 cache", L"V-Cache", L"V-Cache" },
+    { FX_ECO, 0xE945, L"Без энергосбережения (EcoQoS)", L"No power throttling (EcoQoS)", L"Windows не снижает игре частоту, когда окно не в фокусе",
+      L"Windows doesn't slow the game down when its window loses focus", L"без EcoQoS", L"no EcoQoS" },
+};
+
+static int fx_index(int bit)
+{
+    for (int k = 0; k < countof(k_fx); k++)
+        if (k_fx[k].bit == bit) return k;
+    return 0;
+}
+
+// The short names of the fixes on, joined; returns how many.
+static int gm_fix_text(int fix, WCHAR *out, int cap)
+{
+    int n = 0, len = 0;
+    out[0] = 0;
+    for (int k = 0; k < countof(k_fx); k++)
+        if (fix & k_fx[k].bit) {
+            int w = wfmt(out + len, cap - len, n ? L" · %s" : L"%s", g_lang_ru ? k_fx[k].sru : k_fx[k].sen);
+            if (w > 0) len += w;
+            n++;
+        }
+    return n;
+}
+
+static void gm_dlg_show(int i)
+{
+    if (i < 0 || i >= GM.n) return;
+    GM.dlg = i;
+    GM.dlg_open = true;
+    GM.dlg_t = GM.dlg_v = 0;
+    wcopy(GM.dlg_exe, countof(GM.dlg_exe), GM.list[i].exe);
+    // the fixes this CPU gets, and any that is on from before
+    int avail = fx_avail() | GM.list[i].fix;
+    GM.ndlg = 0;
+    for (int k = 0; k < countof(k_fx); k++)
+        if (avail & k_fx[k].bit) {
+            GM.ftog[GM.ndlg] = (GM.list[i].fix & k_fx[k].bit) ? 1.f : 0.f;
+            GM.ftogv[GM.ndlg] = 0;
+            GM.dlg_fx[GM.ndlg++] = k_fx[k].bit;
+        }
+    A.hover.type = HT_NONE;
+    invalidate();
+}
+
+static void gm_dlg_close(void)
+{
+    GM.dlg_open = false;
+    GM.dlg_exe[0] = 0;
+    A.hover.type = HT_NONE;
+    invalidate();
+}
+
+static bool gm_dlg_open(void) { return GM.dlg_open; }
+
+// The note after a fix's line: the CPUs it leaves the game, or a warning.
+static void gm_fix_note(int bit, WCHAR *out, int cap, u32 *col)
+{
+    const Theme *t = &A.th;
+    WCHAR mt[120];
+    out[0] = 0;
+    *col = t->faint;
+    if (bit == FX_CPU0 && A.cpu.count <= 4) {
+        wcopy(out, cap, TR("мало потоков, FPS может упасть", "few threads, FPS can drop"));
+        *col = t->warn;
+    } else if (bit == FX_PCORES || bit == FX_VCACHE) {
+        mask_text(bit == FX_PCORES ? GC.pcores : GC.vcache, mt, countof(mt));
+        wcopy(out, cap, mt);
+    }
+}
+
+// Lays the dialog out; with draw set it also draws it.
+static void gm_dlg_pass(bool draw)
+{
+    if (GM.dlg < 0 || GM.dlg >= GM.n) return;
+    const Theme *t = &A.th;
+    const Colors *c = &A.c;
+    const Game *g = &GM.list[GM.dlg];
+    // a fix is a short row: there will be more of them
+    f32 w = MIN(S(580), (f32)A.W - S(40)), pad = S(24), rh = S(54), head = S(44);
+    f32 h = pad + head + S(12) + rh * (f32)GM.ndlg + S(12) + S(34) + pad;
+    f32 x = floorf(((f32)A.W - w) * 0.5f), y = floorf(((f32)A.H - h) * 0.5f), ry = y + pad + head + S(12);
+    GM.dlg_panel = (Box){ x, y, w, h };
+    for (int k = 0; k < GM.ndlg; k++) {
+        GM.dlg_rows[k] = (Box){ x + S(8), ry + rh * (f32)k, w - S(16), rh };
+        GM.dlg_sw[k] = (Box){ x + w - S(24) - S(52), GM.dlg_rows[k].y + (rh - S(32)) * 0.5f, S(52), S(32) };
+    }
+    GM.dlg_done = (Box){ x + w - pad - S(130), y + h - pad - S(34), S(130), S(34) };
+    if (!draw) return;
+
+    RXf xf = popup_push(&GM.dlg_panel, GM.dlg_t);
+    r_rect(x, y, w, h, t->dark ? RGBA(43, 43, 46, 255) : RGBA(251, 251, 252, 255), S(14));
+    r_rect_ex(x, y, w, h, c->pop_border, S(14), 1.f, 0);
+
+    // the game: its icon, name and exe
+    f32 isz = S(36), cy = y + pad + head * 0.5f, tx = x + pad + isz + S(14);
+    gm_draw_icon(GM.dlg, x + pad, floorf(cy - isz * 0.5f), isz);
+    text_draw_fit(FONT_TEXT_SEMIBOLD, SC(18), tx, baseline_for(FONT_TEXT_SEMIBOLD, SC(18), cy - S(9)), x + w - pad - tx, g->name, -1, t->text, false);
+    text_draw_fit(FONT_TEXT, SC(12.5f), tx, baseline_for(FONT_TEXT, SC(12.5f), cy + S(12)), x + w - pad - tx, g->exe, -1, t->dim, false);
+
+    for (int k = 0; k < GM.ndlg; k++) {
+        Box *r = &GM.dlg_rows[k];
+        int fi = fx_index(GM.dlg_fx[k]);
+        bool hov = A.hover.type == HT_GMFIX && A.hover.idx == k;
+        f32 rhv = hover_amt(r, hov);
+        if (rhv > 0) r_rect(r->x, r->y + S(2), r->w, r->h - S(4), color_alpha(c->nav_hover, rhv), S(8));
+        // the icon, the name, and what it does in a line with its note after it
+        f32 rcy = r->y + r->h * 0.5f, isz2 = S(30), ix = r->x + S(14), rtx = ix + isz2 + S(12), tw = GM.dlg_sw[k].x - S(12) - rtx;
+        draw_icon_tile(ix, floorf(rcy - isz2 * 0.5f), isz2, k_fx[fi].glyph);
+        text_draw_fit(FONT_TEXT_SEMIBOLD, SC(13.5f), rtx, baseline_for(FONT_TEXT_SEMIBOLD, SC(13.5f), rcy - S(9)), tw, g_lang_ru ? k_fx[fi].ru : k_fx[fi].en, -1, t->text, false);
+        WCHAR note[160], nl[170];
+        u32 nc;
+        gm_fix_note(GM.dlg_fx[k], note, countof(note), &nc);
+        f32 dfs = SC(12), dby = baseline_for(FONT_TEXT, dfs, rcy + S(10)), nw = 0;
+        if (note[0]) {
+            wfmt(nl, countof(nl), L" · %s", note);
+            nw = MIN(text_width(FONT_TEXT, dfs, nl, -1), tw * 0.6f);
+        }
+        f32 dw = text_draw_fit(FONT_TEXT, dfs, rtx, dby, tw - nw, g_lang_ru ? k_fx[fi].dru : k_fx[fi].den, -1, t->dim, false);
+        if (note[0]) text_draw_fit(FONT_TEXT, dfs, rtx + dw, dby, nw, nl, -1, nc, false);
+        draw_switch(&GM.dlg_sw[k], GM.ftog[k], true, hov);
+        if (k + 1 < GM.ndlg) r_rect(r->x + S(14), r->y + r->h - 1, r->w - S(28), 1, color_alpha(t->sep, 0.7f * (1.f - rhv)), 0);
+    }
+
+    // where the game runs now, and Done
+    r_rect(x + S(1), GM.dlg_done.y - S(12), w - S(2), 1, t->sep, 0);
+    WCHAR foot[160], mt[120];
+    if (g->fix & FX_AFF) {
+        gm_cpu();
+        mask_text(fx_mask(g->fix, GC.all), mt, countof(mt));
+        wfmt(foot, countof(foot), TR("Ядра игры: %s", "The game's cores: %s"), mt);
+    } else {
+        wcopy(foot, countof(foot), TR("Применяется сразу и держится при каждом запуске игры", "Applies at once and is kept on every start of the game"));
+    }
+    f32 my = GM.dlg_done.y + GM.dlg_done.h * 0.5f;
+    text_draw_fit(FONT_TEXT, SC(12.5f), x + pad, baseline_for(FONT_TEXT, SC(12.5f), my), GM.dlg_done.x - x - pad - S(12), foot, -1, t->dim, false);
+    draw_button(&GM.dlg_done, TR("Готово", "Done"), 0, BTN_ACCENT, hover_amt(&GM.dlg_done, A.hover.type == HT_GMDONE),
+                A.press.type == HT_GMDONE && A.hover.type == HT_GMDONE, false);
+    r_xf_pop(xf);
+    R.opacity = 1.f;
+}
+
+static void draw_gm_dialog(void)
+{
+    if (GM.dlg_open || GM.dlg_t > 0) gm_dlg_pass(true);
+}
+
+static Hit gm_dlg_hit(f32 x, f32 y)
+{
+    gm_dlg_pass(false);
+    if (in_b(&GM.dlg_done, x, y)) return (Hit){ HT_GMDONE, -1 };
+    for (int k = 0; k < GM.ndlg; k++)
+        if (in_b(&GM.dlg_rows[k], x, y)) return (Hit){ HT_GMFIX, k };
+    return (Hit){ in_b(&GM.dlg_panel, x, y) ? HT_GMDLG : HT_GMOUT, -1 };
+}
+
 static bool gm_animate(f32 dt)
 {
     bool anim = false;
-    for (int i = 0; i < GM.n; i++) anim |= spring(&GM.tog[i], &GM.togv[i], GM.list[i].on ? 1.f : 0.f, 0.34f, 0.7f, 0.002f, dt);
+    // the dialog opens with a little bounce and closes quickly without one, as the others
+    anim |= spring(&GM.dlg_t, &GM.dlg_v, GM.dlg_open ? 1.f : 0.f, GM.dlg_open ? 0.42f : 0.24f, GM.dlg_open ? 0.74f : 1.f, 0.002f, dt);
+    if (!GM.dlg_open && GM.dlg_t <= 0.f) GM.dlg = -1;
+    if (GM.dlg >= 0 && GM.dlg < GM.n)
+        for (int k = 0; k < GM.ndlg; k++)
+            anim |= spring(&GM.ftog[k], &GM.ftogv[k], (GM.list[GM.dlg].fix & GM.dlg_fx[k]) ? 1.f : 0.f, 0.34f, 0.7f, 0.002f, dt);
     if (GM.pg_t < 1.f) {
         GM.pg_t = MIN(1.f, GM.pg_t + dt / 0.45f);
         anim = true;
@@ -552,7 +760,7 @@ static bool gm_animate(f32 dt)
     return anim;
 }
 
-// A click anywhere on a game's row flips its switch, but on the remove button.
+// A click anywhere on a game's row opens its dialog, but on the remove button.
 static Hit gm_hit(f32 x, f32 y)
 {
     if (y < S(HW_TOP) - S(6)) return (Hit){ HT_NONE, -1 };
@@ -565,7 +773,7 @@ static Hit gm_hit(f32 x, f32 y)
     }
     for (int i = gm_first(); i < gm_last(); i++) {
         if (GM.list[i].custom && in_b(&GM.del[i], x, y)) return (Hit){ HT_GMDEL, i };
-        if (in_b(&GM.rows[i], x, y)) return (Hit){ HT_GMTOG, i };
+        if (in_b(&GM.rows[i], x, y)) return (Hit){ HT_GMROW, i };
     }
     return (Hit){ HT_NONE, -1 };
 }
@@ -574,9 +782,12 @@ static void gm_click(Hit h)
 {
     switch (h.type) {
     case HT_GMADD: gm_add(); break;
-    case HT_GMTOG:
-        if (h.idx >= 0 && h.idx < GM.n) gm_toggle(h.idx);
+    case HT_GMROW:
+        if (h.idx >= 0 && h.idx < GM.n) gm_dlg_show(h.idx);
         break;
+    case HT_GMFIX: gm_fix_toggle(h.idx); break;
+    case HT_GMDONE:
+    case HT_GMOUT: gm_dlg_close(); break;
     case HT_GMDEL:
         if (h.idx >= 0 && h.idx < GM.n) gm_remove(h.idx);
         break;

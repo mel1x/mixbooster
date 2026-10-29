@@ -67,10 +67,14 @@ enum {
     HT_PRPARK,
     HT_PRSLIDER,  // idx: PS_*
     HT_REBOOT,    // "Restart needed" in the sidebar
-    HT_GMTOG,     // the Game fixes page; idx: the game
+    HT_GMROW,     // the Game fixes page, a game's row that opens its fixes; idx: the game
     HT_GMDEL,     // idx: the game added by hand
     HT_GMADD,
     HT_GMPAGE,    // the pages under the game list; idx: the page, GMP_PREV or GMP_NEXT
+    HT_GMFIX,     // the game's dialog; idx: the fix's row
+    HT_GMDONE,
+    HT_GMDLG,
+    HT_GMOUT,
     HT_UPDATE,    // the update card in the sidebar
 };
 
@@ -1533,7 +1537,8 @@ static void draw_toast(void)
 #include "jobs.c"
 #include "donate.c"
 
-static bool page_open(void) { return !A.modal && !A.picker && !D.open; }
+static bool gm_dlg_open(void);
+static bool page_open(void) { return !A.modal && !A.picker && !D.open && !gm_dlg_open(); }
 #include "hwpage.c"
 #include "healthpage.c"
 #include "msipage.c"
@@ -1601,6 +1606,7 @@ static void draw_all(void)
     R.opacity = 1.f;
     if (A.modal || A.modal_t > 0) modal_pass(true);
     if (A.picker || A.picker_t > 0) picker_pass(true);
+    draw_gm_dialog();
     draw_toast();
     if (D.open) draw_donate();
     confetti_draw();
@@ -1815,6 +1821,7 @@ static Hit hit_test(int mx, int my)
         h.type = in_b(&A.m_ok, x, y) ? HT_MOK : in_b(&A.m_cancel, x, y) ? HT_MCANCEL : in_b(&A.m_panel, x, y) ? HT_MPANEL : HT_MOUT;
         return h;
     }
+    if (gm_dlg_open()) return gm_dlg_hit(x, y);
     if (msi_menu_hit(x, y, &h)) return h;
     Box n;
     if (update_shown()) {
@@ -2097,6 +2104,10 @@ static void key_down(UINT vk)
         else if (vk == VK_RETURN) modal_close(true);
         return;
     }
+    if (gm_dlg_open()) {
+        if (vk == VK_ESCAPE || vk == VK_RETURN) gm_dlg_close();
+        return;
+    }
     if (A.page == PG_MSI && MP.dd >= 0) {
         if (vk == VK_ESCAPE) MP.dd = -1;
         invalidate();
@@ -2168,7 +2179,7 @@ static LRESULT nc_hit(HWND h, LPARAM lp)
         winbtn_box(i, &r);
         if (in_b(&r, x, y)) return HTCLIENT;
     }
-    if (A.modal || A.picker || D.open) return HTCLIENT;
+    if (A.modal || A.picker || D.open || gm_dlg_open()) return HTCLIENT;
     if (y < S(80) && x >= sb_x() + sb_w()) return HTCAPTION;
     if (x < sb_x() + sb_w() && y < sb_x() + S(72)) return HTCAPTION;
     return HTCLIENT;
@@ -2248,7 +2259,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             int t = A.hover.type;
             bool hand = t == HT_SLIDER || t == HT_TAB || t == HT_PICK || (t == HT_START && !B.cancel) || t == HT_BIND || t == HT_RESET || t == HT_MOK ||
                         t == HT_MCANCEL || t == HT_DONATE || t == HT_LANG || t == HT_MANUAL || t == HT_PKCELL || t == HT_PKBEST ||
-                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || t == HT_TABPLUS || t == HT_RERUN || (t >= HT_MSITOG && t <= HT_MSIREBOOT && t != HT_MSIDDPANEL && t != HT_MSIDDOUT) || (t >= HT_GFXTOG && t <= HT_REBOOT) || t == HT_GMPAGE || (t == HT_UPDATE && upd_state() == UPD_READY) || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
+                        t == HT_PKCLEAR || t == HT_PKOK || t == HT_PKCANCEL || t == HT_HLREFRESH || t == HT_COLHDR || t == HT_TABPLUS || t == HT_RERUN || (t >= HT_MSITOG && t <= HT_MSIREBOOT && t != HT_MSIDDPANEL && t != HT_MSIDDOUT) || (t >= HT_GFXTOG && t <= HT_REBOOT) || (t >= HT_GMROW && t <= HT_GMDONE) || (t == HT_UPDATE && upd_state() == UPD_READY) || (t == HT_DON && (A.hover.idx >= 0 || A.hover.idx == DON_LINK || A.hover.idx == DON_CLOSE));
             SetCursor(LoadCursorW(NULL, hand ? (LPCWSTR)IDC_HAND : (LPCWSTR)IDC_ARROW));
             return TRUE;
         }
@@ -2264,7 +2275,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         mouse_up(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         return 0;
     case WM_MOUSEWHEEL:
-        if (A.modal || A.picker) return 0;
+        if (A.modal || A.picker || gm_dlg_open()) return 0;
         if (D.open) {
             D.scroll_target = CLAMP(D.scroll_target - (f32)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * S(64), 0.f, MAX(0.f, D.content_h - D.view_h));
             invalidate();

@@ -366,6 +366,35 @@ static void sata_rows(HwCard *c, HANDLE h, bool ssd)
     if (failing) row_state(c, HS_BAD);
 }
 
+// Free space on the system volume, if it is one of this drive's ("C:, D:"): Windows needs room there for updates,
+// the page file and shader caches. 80 GB is enough on any drive (a percentage asks too much of a big one); on a
+// smaller volume a quarter of it.
+static void hl_free_space(HwCard *c, const WCHAR *letters)
+{
+    WCHAR win[MAX_PATH];
+    if (!GetWindowsDirectoryW(win, MAX_PATH) || win[1] != L':') return;
+    for (const WCHAR *p = letters; *p; p++) {
+        if (p[1] != L':' || towupper(p[0]) != towupper(win[0])) continue;
+        WCHAR root[4] = { p[0], L':', L'\\', 0 };
+        ULARGE_INTEGER avail, total;
+        if (!GetDiskFreeSpaceExW(root, &avail, &total, NULL) || !total.QuadPart) continue;
+        u64 want = MIN(80ull << 30, (u64)total.QuadPart / 4);
+        WCHAR k[48], fs[32], ts[32];
+        fmt_size(fs, countof(fs), avail.QuadPart);
+        fmt_size(ts, countof(ts), total.QuadPart);
+        wfmt(k, countof(k), TR("Свободно на %c:", "Free on %c:"), p[0]);
+        bool low = avail.QuadPart < want;
+        row_add(c, false, k, low ? TR("%s из %s - мало, игры и обновления не поместятся", "%s of %s - low, games and updates won't fit") : TR("%s из %s", "%s of %s"), fs, ts);
+        row_state(c, low ? HS_WARN : HS_GOOD);
+        if (low && c->state < HS_WARN) {
+            WCHAR keep[48];
+            const WCHAR *dot = wcsstr(c->badge, L" · ");
+            wcopy(keep, countof(keep), dot ? dot + 3 : L"");
+            hl_badge(c, HS_WARN, keep);
+        }
+    }
+}
+
 static void hl_disks(void)
 {
     WCHAR letters[32][24];
@@ -425,6 +454,7 @@ static void hl_disks(void)
                        : TR("нужны права администратора", "needs administrator rights"));
         }
         CloseHandle(h);
+        hl_free_space(c, letters[i]);
         // Windows logged read errors (bad blocks, retries) on this disk: worth a backup and a closer look
         int errs = disk_errors_for(i, serial);
         shown += errs;

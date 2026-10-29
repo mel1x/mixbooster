@@ -14,8 +14,8 @@
 - **GPU Affinity.** Tests every CPU core with the GPU's interrupts on it and binds the GPU to the steadiest one.
 - **MSI Mode.** MSI and interrupt priority for every PCI device, in one table.
 - **Core parking.** Power plans, parking and processor state, with every core shown live; adds the MixBoost Low Latency plan.
-- **Graphics.** HAGS, MPO, VRR, windowed and fullscreen optimizations in one place.
-- **Game fixes.** CPU 0 off with High CPU and GPU priority for each game; finds Steam, Epic, Riot and Battle.net games and works with Process Lasso.
+- **Graphics.** HAGS, MPO, VRR, windowed and fullscreen optimizations and core isolation (VBS) in one place.
+- **Game fixes.** Per game: High CPU priority, High GPU priority, CPU 0 off, P-cores only on hybrid Intel, the V-Cache CCD only on Ryzen X3D, no EcoQoS; finds Steam, Epic, Riot and Battle.net games and works with Process Lasso.
 - **PC components and health.** A gaming score for the PC, drive health, memory, drivers, BSODs and WHEA errors.
 - **Kept after driver updates.** A small service puts the GPU core, the MSI settings and the game fixes back.
 - **No AI, no telemetry.**

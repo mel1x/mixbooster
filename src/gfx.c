@@ -11,23 +11,32 @@
 //          SwapEffectUpgradeEnable=1;": the string Settings writes, other keys in it kept.
 //   FSO    HKCU\System\GameConfigStore  GameDVR_DXGIHonorFSEWindowsCompatible = 1 and GameDVR_HonorUserFSEBehaviorMode
 //          = 1 (with GameDVR_FSEBehaviorMode and GameDVR_FSEBehavior = 2): fullscreen optimizations off for every game.
+//   VBS    HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard  EnableVirtualizationBasedSecurity and
+//          ...\Scenarios\HypervisorEnforcedCodeIntegrity  Enabled (memory integrity), both 0 or both 1; applies after a
+//          restart. Whether it runs now comes from NtQuerySystemInformation. A group policy or a UEFI lock wins over these
+//          values: the switch is off then.
 //
 // What MPO and FSO had before the first change is kept in HKLM\SOFTWARE\MixBooster\Gfx, so turning them back on
 // restores it exactly.
 
-enum { GX_HAGS, GX_MPO, GX_VRR, GX_WGO, GX_FSO, GX__COUNT };
+enum { GX_HAGS, GX_MPO, GX_VRR, GX_WGO, GX_FSO, GX_VBS, GX__COUNT };
 
 #define GX_DRV_KEY L"SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers"
 #define GX_DWM_KEY L"SOFTWARE\\Microsoft\\Windows\\Dwm"
 #define GX_DX_KEY L"Software\\Microsoft\\DirectX\\UserGpuPreferences"
 #define GX_GCS_KEY L"System\\GameConfigStore"
 #define GX_SAVE_KEY MB_REG_KEY L"\\Gfx"
+#define GX_DG_KEY L"SYSTEM\\CurrentControlSet\\Control\\DeviceGuard"
+#define GX_HVCI_KEY GX_DG_KEY L"\\Scenarios\\HypervisorEnforcedCodeIntegrity"
+#define GX_DG_POLICY L"SOFTWARE\\Policies\\Microsoft\\Windows\\DeviceGuard"
 #define GX_ROW_H 90.f
 
 static struct {
     bool ready;
     bool on[GX__COUNT];
     bool hags_sup, hags_run, hags_def;
+    bool vbs_run;
+    int vbs_lock;  // 0, or what keeps VBS as it is: 1 a group policy, 2 a UEFI lock
     f32 tog[GX__COUNT], togv[GX__COUNT];
     int seq[GX__COUNT], pend;  // clicks per switch, and jobs not done: Windows is read again once they are
     f32 scroll, scroll_target, scroll_v, content_h, sb_t;
@@ -164,6 +173,36 @@ static bool mpo_on(void)
     return gx_get(HKEY_LOCAL_MACHINE, GX_DWM_KEY, L"OverlayTestMode") != 5 && gx_get(HKEY_LOCAL_MACHINE, GX_DRV_KEY, L"DisableOverlays") != 1;
 }
 
+// VBS running now: the secure kernel, or memory integrity where the first query isn't there.
+typedef LONG(NTAPI *PFN_MbNtQuerySysInfo)(ULONG, void *, ULONG, ULONG *);
+
+static bool vbs_running(void)
+{
+    PFN_MbNtQuerySysInfo q = (PFN_MbNtQuerySysInfo)(void *)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation");
+    if (!q) return false;
+    u8 ium[16] = { 0 };
+    // SystemIsolatedUserModeInformation: bit 0 the secure kernel runs, bit 1 memory integrity
+    if (q(165, ium, sizeof ium, NULL) == 0) return (ium[0] & 3) != 0;
+    // SystemCodeIntegrityInformation: CODEINTEGRITY_OPTION_HVCI_KMCI_ENABLED
+    ULONG ci[2] = { sizeof ci, 0 };
+    return q(103, ci, sizeof ci, NULL) == 0 && (ci[1] & 0x400);
+}
+
+// On as set: either value 1; with neither there, what runs now (Windows' own default).
+static bool vbs_on(void)
+{
+    int v = gx_get(HKEY_LOCAL_MACHINE, GX_DG_KEY, L"EnableVirtualizationBasedSecurity"), h = gx_get(HKEY_LOCAL_MACHINE, GX_HVCI_KEY, L"Enabled");
+    if (v < 0 && h < 0) return vbs_running();
+    return v == 1 || h == 1;
+}
+
+static int vbs_lock(void)
+{
+    if (gx_get(HKEY_LOCAL_MACHINE, GX_DG_POLICY, L"EnableVirtualizationBasedSecurity") >= 0) return 1;
+    if (gx_get(HKEY_LOCAL_MACHINE, GX_DG_KEY, L"Locked") == 1 || gx_get(HKEY_LOCAL_MACHINE, GX_HVCI_KEY, L"Locked") == 1) return 2;
+    return 0;
+}
+
 static bool fso_on(void)
 {
     return !(gx_get(HKEY_CURRENT_USER, GX_GCS_KEY, L"GameDVR_DXGIHonorFSEWindowsCompatible") == 1 &&
@@ -180,6 +219,9 @@ static void gx_read(void)
     GX.on[GX_VRR] = dx_get(L"VRROptimizeEnable") == 1;
     GX.on[GX_WGO] = dx_get(L"SwapEffectUpgradeEnable") == 1;
     GX.on[GX_FSO] = fso_on();
+    GX.vbs_run = vbs_running();
+    GX.vbs_lock = vbs_lock();
+    GX.on[GX_VBS] = vbs_on();
     // HAGS knows what it runs on: a restart is due exactly while the two differ
     if (GX.hags_sup && GX.on[GX_HAGS] != GX.hags_run) reboot_mark(L"Hags");
     else reboot_clear(L"Hags");
@@ -225,6 +267,19 @@ static void gx_set(int i, bool on)
             }
         }
         break;
+    case GX_VBS:
+        if (!on) {
+            gx_save_old(L"Vbs.Enable", gx_get(HKEY_LOCAL_MACHINE, GX_DG_KEY, L"EnableVirtualizationBasedSecurity"));
+            gx_save_old(L"Vbs.Hvci", gx_get(HKEY_LOCAL_MACHINE, GX_HVCI_KEY, L"Enabled"));
+        } else {
+            // on is on: what was there before goes, Windows' defaults could leave it off
+            gx_take_old(L"Vbs.Enable", -1);
+            gx_take_old(L"Vbs.Hvci", -1);
+        }
+        gx_put(HKEY_LOCAL_MACHINE, GX_DG_KEY, L"EnableVirtualizationBasedSecurity", on ? 1 : 0);
+        gx_put(HKEY_LOCAL_MACHINE, GX_HVCI_KEY, L"Enabled", on ? 1 : 0);
+        reboot_change(L"Vbs", on ? 0 : 1, on ? 1 : 0);
+        break;
     }
     log_msg("gfx: %d -> %s", i, on ? "on" : "off");
 }
@@ -238,6 +293,7 @@ static bool gx_is_on(int i)
     case GX_VRR: return dx_get(L"VRROptimizeEnable") == 1;
     case GX_WGO: return dx_get(L"SwapEffectUpgradeEnable") == 1;
     case GX_FSO: return fso_on();
+    case GX_VBS: return vbs_on();
     }
     return false;
 }
@@ -284,6 +340,9 @@ static const struct {
     { 0xE740, L"Оптимизация во весь экран", L"Fullscreen optimizations",
       L"Windows подменяет эксклюзивный полноэкранный режим окном без рамки. Выключение возвращает настоящий эксклюзивный режим, в старых играх задержка бывает ниже.",
       L"Windows swaps exclusive fullscreen for a borderless window. Off brings real exclusive fullscreen back; in older games latency can drop." },
+    { 0xEA18, L"Изоляция ядра (VBS и целостность памяти)", L"Core isolation (VBS and memory integrity)",
+      L"Защищает ядро Windows от вредоносных драйверов, но в части игр стоит несколько процентов FPS. Выключение снижает защиту ПК.",
+      L"Shields the Windows kernel from malicious drivers but costs a few percent of FPS in some games. Off lowers the PC's protection." },
 };
 
 static f32 gx_view_h(void) { return (f32)A.H - S(HW_TOP) - S(8); }
@@ -358,6 +417,23 @@ static void draw_gfx_page(void)
                 wcopy(note, countof(note), TR("Выключено: игры в окне без рамки выводят кадры через DWM", "Off: borderless games present through DWM"));
                 nc = t->dim;
             }
+        } else if (i == GX_VBS) {
+            u64 tm = 0;
+            if (GX.vbs_lock) {
+                enabled = false;
+                wcopy(note, countof(note), GX.vbs_lock == 1 ? TR("Задано групповой политикой", "Set by a group policy")
+                                                            : TR("Заблокировано в UEFI: меняется только через BIOS", "Locked in UEFI: only the BIOS changes it"));
+                nc = t->faint;
+            } else if (rb_get(L"Vbs", &tm) && same_boot(tm)) {
+                wcopy(note, countof(note), GX.on[i] ? TR("Включится после перезагрузки", "Turns on after a restart") : TR("Выключится после перезагрузки", "Turns off after a restart"));
+                nc = t->warn;
+            } else if (!GX.on[i] && GX.vbs_run) {
+                wcopy(note, countof(note), TR("Всё ещё работает: его держат Hyper-V, WSL или Credential Guard", "Still running: Hyper-V, WSL or Credential Guard keeps it"));
+                nc = t->warn;
+            } else {
+                wcopy(note, countof(note), GX.vbs_run ? TR("Работает сейчас", "Running now") : TR("Сейчас выключено", "Off now"));
+                nc = GX.vbs_run ? t->dim : t->good;
+            }
         } else {
             wcopy(note, countof(note), TR("Для игр, запущенных после изменения", "For games started after the change"));
             nc = t->faint;
@@ -389,7 +465,7 @@ static Hit gx_hit(f32 x, f32 y)
 {
     if (y < S(HW_TOP) - S(6)) return (Hit){ HT_NONE, -1 };
     for (int i = 0; i < GX__COUNT; i++)
-        if (in_b(&GX.sw[i], x, y) && (i != GX_HAGS || GX.hags_sup)) return (Hit){ HT_GFXTOG, i };
+        if (in_b(&GX.sw[i], x, y) && (i != GX_HAGS || GX.hags_sup) && (i != GX_VBS || !GX.vbs_lock)) return (Hit){ HT_GFXTOG, i };
     return (Hit){ HT_NONE, -1 };
 }
 

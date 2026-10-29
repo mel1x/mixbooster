@@ -60,35 +60,49 @@ doesn't have, and turns it on.
 Switches for HAGS (`GraphicsDrivers\HwSchMode`, with what the GPU supports and runs now from D3DKMT), MPO
 (`Dwm\OverlayTestMode = 5` and, for 24H2, `GraphicsDrivers\DisableOverlays`), variable refresh rate and windowed-game
 optimizations (`DirectXUserGlobalSettings`, as Settings writes it) and fullscreen optimizations
-(`GameConfigStore\GameDVR_*`). They apply on a click; MPO and FSO keep what was there before in
-`HKLM\SOFTWARE\MixBooster\Gfx`, so turning them back on restores it.
+(`GameConfigStore\GameDVR_*`), and core isolation: VBS with memory integrity (`DeviceGuard\EnableVirtualizationBasedSecurity`
+and `Scenarios\HypervisorEnforcedCodeIntegrity\Enabled`, both 0 or both 1, after a restart; whether it runs now comes
+from `NtQuerySystemInformation`, and a group policy or a UEFI lock leaves the switch off). They apply on a click; MPO
+and FSO keep what was there before in `HKLM\SOFTWARE\MixBooster\Gfx`, so turning them back on restores it.
 
 ## Game fixes
 
 Fixes per game exe. The games are found in the Steam libraries, the Epic manifests, the installed programs (Riot,
-Battle.net, BSG) and among the running processes; *Add a game* takes any other exe.
+Battle.net, BSG) and among the running processes; *Add a game* takes any other exe. A click on a game opens a dialog
+with a switch per fix; a fix for a particular CPU shows only on that CPU.
 
-**CPU 0 + High CPU and GPU priority.** The switch writes `Image File Execution Options\<exe>\PerfOptions\CpuPriorityClass = 3`,
-so Windows starts the game with High priority, and the service takes CPU 0 out of every new process of that exe and
-sets its GPU scheduling priority to High (`D3DKMTSetProcessSchedulingPriorityClass`); it looks every 3 seconds, once
-per process. A game already running gets all of it at once. On a CPU with 4 threads or fewer the page warns first.
+- **High CPU priority.** Writes `Image File Execution Options\<exe>\PerfOptions\CpuPriorityClass = 3`, so
+  Windows starts the game with High priority.
+- **High GPU priority.** The service sets the game's GPU scheduling priority to High
+  (`D3DKMTSetProcessSchedulingPriorityClass`).
+- **CPU 0 off.** The service takes CPU 0 out of the game's affinity. On a CPU with 4 threads or fewer the switch warns.
+- **P-cores only** (hybrid Intel CPUs). The game runs only on the cores of the highest efficiency class.
+- **3D V-Cache CCD only** (Ryzen X3D with two CCDs). The game runs only on the CCD with the bigger L3.
+- **No power throttling (EcoQoS)** (hybrid CPUs and laptops). `SetProcessInformation(ProcessPowerThrottling)` with
+  execution speed throttling off, so Windows doesn't slow the game down when it loses focus.
 
-Where Process Lasso is installed, the service doesn't watch the games: the rules go into its `prolasso.ini`
-(`DefaultPriorities`, `DefaultAffinitiesEx`, `DefaultGPUPriorities`) and Lasso keeps them, running or from its next
-start. A rule the user had there for that exe is kept and put back when the switch goes off. If Lasso is removed
-later, the service takes the games back.
+The service looks every 3 seconds, once per process; a game already running gets a change at once. The affinity
+fixes add up (P-cores without CPU 0, for example).
 
-What is on lives in `HKLM\SOFTWARE\MixBooster\Games`, with what IFEO and Process Lasso had before.
+Where Process Lasso is installed, it keeps the priority and the affinity instead of the service: the rules go into
+its `prolasso.ini` (`DefaultPriorities`, `DefaultAffinitiesEx`, `DefaultGPUPriorities`) and Lasso keeps them, running
+or from its next start. EcoQoS, and an affinity that isn't one run of CPUs, stay with the service. A rule the user had
+there for that exe is kept and put back when the fix goes off. If Lasso is removed later, the service takes the games
+back.
+
+What is on lives in `HKLM\SOFTWARE\MixBooster\Games` (`Fix`, the bits of the fixes on), with what IFEO and Process
+Lasso had before.
 
 ## Restart needed
 
 A card in the sidebar, on every page, while something waits for a restart: MSI Mode, the GPU's PCIe port, HAGS, MPO,
-or Windows Update. Each change leaves a mark in `HKLM\SOFTWARE\MixBooster\Reboot` with the boot it was made in; a
+VBS, or Windows Update. Each change leaves a mark in `HKLM\SOFTWARE\MixBooster\Reboot` with the boot it was made in; a
 mark from an earlier boot is dropped. The card opens the restart dialog.
 
 ## PC health
 
-Drives (NVMe health log, SMART), battery, memory, drivers, stability over 30 days and device problems. Memory: the
+Drives (NVMe health log, SMART, free space on the system volume: a warning under 80 GB, or under a quarter of a
+smaller one), battery, memory, drivers, stability over 30 days and device problems. Memory: the
 speed against the modules' rating, read from the part number for the gaming brands (an XMP / EXPO kit far below it
 has its profile off), single channel, mixed modules, and the last Windows Memory Diagnostic result. Drivers: each
 GPU driver's age (a warning after 6 months, 12 for an integrated GPU), and whether the chipset has AMD's or Intel's

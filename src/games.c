@@ -1,16 +1,22 @@
-// Game fixes: "CPU 0 off + High priority" (CPU and GPU) for chosen game exes.
+// Game fixes for chosen game exes, each on its own switch (FX_*):
 //
-//   Priority   HKLM\...\Image File Execution Options\<exe>\PerfOptions  CpuPriorityClass = 3: Windows starts the
-//              process with High priority itself.
-//   CPU 0, GPU no such values in Windows: the service looks at the running processes every few seconds, takes CPU 0
-//              out of a new game process's affinity and sets its GPU scheduling priority to High
-//              (D3DKMTSetProcessSchedulingPriorityClass), and High CPU priority again, in case the game lowered it.
-//   Lasso      where Process Lasso is installed the service doesn't watch the games: the rules go into its
-//              prolasso.ini instead ([ProcessDefaults] DefaultPriorities = exe,high, DefaultAffinitiesEx = exe,0,1-N
-//              and DefaultGPUPriorities = exe,4); its core engine reads the file at start and when it changes.
+//   CPU High   HKLM\...\Image File Execution Options\<exe>\PerfOptions  CpuPriorityClass = 3: Windows starts the
+//              process with High priority itself; the service sets it again, in case the game lowered it.
+//   GPU High   the service sets the process's GPU scheduling priority to High (D3DKMTSetProcessSchedulingPriorityClass).
+//   CPU 0      no such value in Windows: the service looks at the running processes every few seconds and takes CPU 0
+//              out of a new game process's affinity.
+//   P-cores    hybrid Intel CPUs: the game only on the performance cores (the highest efficiency class).
+//   V-Cache    Ryzen X3D with two CCDs: the game only on the CCD with 3D V-Cache (the bigger L3).
+//   EcoQoS     power throttling off for the game (SetProcessInformation, ProcessPowerThrottling), so Windows doesn't
+//              slow it down or send it to the E-cores when it loses focus.
+//   Lasso      where Process Lasso is installed the service doesn't keep the priorities and the affinity: the rules go
+//              into its prolasso.ini instead ([ProcessDefaults] DefaultPriorities = exe,high, DefaultAffinitiesEx =
+//              exe,0,1-N and DefaultGPUPriorities = exe,4); its core engine reads the file at start and when it changes.
+//              EcoQoS, and an affinity that isn't one run of CPUs, stay with the service.
 //
-// What is on lives in HKLM\SOFTWARE\MixBooster\Games, a key per exe (lower case): On, Path, Custom, and what was there
-// before MixBooster (OldIfeo, Lasso, LassoPrio, LassoAff, LassoGpu), so turning a game off puts that back.
+// What is on lives in HKLM\SOFTWARE\MixBooster\Games, a key per exe (lower case): Fix (FX_* bits; older versions wrote
+// only On, which stands for CPU 0 + CPU and GPU High), On, Path, Custom, and what was there before MixBooster (OldIfeo, Lasso,
+// LassoPrio, LassoAff, LassoGpu), so turning a fix off puts that back.
 
 #include <tlhelp32.h>
 
@@ -86,9 +92,14 @@ static const KnownGame k_games[] = {
     { L"Euro Truck Simulator 2", L"eurotrucks2.exe", L"Euro Truck Simulator 2\\bin\\win_x64\\eurotrucks2.exe", NULL, NULL },
 };
 
+enum { FX_CPU0 = 1, FX_HIGH = 2, FX_PCORES = 4, FX_VCACHE = 8, FX_ECO = 16, FX_GPU = 32 };
+#define FX_AFF (FX_CPU0 | FX_PCORES | FX_VCACHE)
+#define FX_LEGACY (FX_CPU0 | FX_HIGH | FX_GPU)  // what On = 1 meant before the fixes were split
+
 typedef struct Game {
     WCHAR name[96], exe[64], path[MAX_PATH];
-    bool on, custom, running;
+    int fix;  // FX_* on
+    bool custom, running;
 } Game;
 
 static void exe_lower(WCHAR *out, int cap, const WCHAR *exe)
@@ -153,9 +164,104 @@ static void gm_put_sz(const WCHAR *exe, const WCHAR *name, const WCHAR *s)
     gm_put(exe, name, REG_SZ, s, (DWORD)((wlen(s) + 1) * sizeof(WCHAR)));
 }
 
-// The exes that are on, lower case; svc: only the ones the service watches, not handed to Process Lasso. Read by the
-// service every few seconds.
-static int games_on_list(WCHAR (*out)[64], int cap, bool svc)
+static int gm_fix(const WCHAR *exe) { return gm_get_dw(exe, L"Fix", gm_get_dw(exe, L"On", 0) ? FX_LEGACY : 0); }
+
+// --- the CPU -------------------------------------------------------------------------------------------------------
+
+// The CPUs the per-CPU fixes keep a game on, in group 0 as the rest: the P-cores of a hybrid CPU, and the CCD with
+// 3D V-Cache of a Ryzen X3D with two CCDs (its L3 is the bigger one). 0 where the CPU has none.
+static struct {
+    bool init, battery;
+    u64 all, pcores, vcache;
+} GC;
+
+static void gm_cpu(void)
+{
+    if (GC.init) return;
+    GC.init = true;
+    int n = MIN((int)GetActiveProcessorCount(0), 64);
+    GC.all = n >= 64 ? ~0ull : (1ull << n) - 1;
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationAll, NULL, &len);
+    u8 *buf = len ? (u8 *)malloc(len) : NULL;
+    if (buf && GetLogicalProcessorInformationEx(RelationAll, (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)buf, &len)) {
+        u8 lo = 255, hi = 0;
+        DWORD l3_min = 0xFFFFFFFF, l3_max = 0;
+        u64 l3_big = 0;
+        int nl3 = 0;
+        for (DWORD off = 0; off < len;) {
+            SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *e = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)(buf + off);
+            off += e->Size;
+            if (e->Relationship == RelationProcessorCore && e->Processor.GroupMask[0].Group == 0) {
+                lo = MIN(lo, e->Processor.EfficiencyClass);
+                hi = MAX(hi, e->Processor.EfficiencyClass);
+            } else if (e->Relationship == RelationCache && e->Cache.Level == 3 && e->Cache.GroupMask.Group == 0) {
+                nl3++;
+                l3_min = MIN(l3_min, e->Cache.CacheSize);
+                if (e->Cache.CacheSize > l3_max) {
+                    l3_max = e->Cache.CacheSize;
+                    l3_big = e->Cache.GroupMask.Mask;
+                }
+            }
+        }
+        for (DWORD off = 0; hi > lo && off < len;) {
+            SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *e = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)(buf + off);
+            off += e->Size;
+            if (e->Relationship == RelationProcessorCore && e->Processor.GroupMask[0].Group == 0 && e->Processor.EfficiencyClass == hi)
+                GC.pcores |= e->Processor.GroupMask[0].Mask;
+        }
+        if (nl3 >= 2 && l3_max > l3_min) GC.vcache = l3_big;
+        GC.pcores &= GC.all;
+        GC.vcache &= GC.all;
+    }
+    free(buf);
+    SYSTEM_POWER_STATUS ps;
+    GC.battery = GetSystemPowerStatus(&ps) && ps.BatteryFlag != 128 && ps.BatteryFlag != 255;
+}
+
+// The fixes this PC gets: P-cores and V-Cache only on those CPUs, EcoQoS where Windows uses it on games (hybrid
+// CPUs and laptops).
+static int fx_avail(void)
+{
+    gm_cpu();
+    return FX_CPU0 | FX_HIGH | FX_GPU | (GC.pcores ? FX_PCORES : 0) | (GC.vcache ? FX_VCACHE : 0) | (GC.pcores || GC.battery ? FX_ECO : 0);
+}
+
+// The affinity a game gets out of sys, the CPUs it may run on.
+static u64 fx_mask(int fix, u64 sys)
+{
+    gm_cpu();
+    u64 m = sys;
+    if ((fix & FX_PCORES) && (m & GC.pcores)) m &= GC.pcores;
+    if ((fix & FX_VCACHE) && (m & GC.vcache)) m &= GC.vcache;
+    if ((fix & FX_CPU0) && (m & ~1ull)) m &= ~1ull;
+    return m;
+}
+
+// The affinity as Process Lasso takes it ("0,1-15"); false when there is nothing to change or it isn't one run of CPUs.
+static bool lasso_aff(int fix, WCHAR *out, int cap)
+{
+    u64 m = fx_mask(fix, GC.all);
+    if (!(fix & FX_AFF) || !m || m == GC.all) return false;
+    int a = 0, b = 63;
+    while (!(m >> a & 1)) a++;
+    while (!(m >> b & 1)) b--;
+    u64 run = (b == 63 ? ~0ull : (2ull << b) - 1) & ~((1ull << a) - 1);
+    if (m != run) return false;
+    wfmt(out, cap, a == b ? L"0,%d" : L"0,%d-%d", a, b);
+    return true;
+}
+
+// What Process Lasso keeps of a game's fixes; the service keeps the rest.
+static int lasso_part(int fix)
+{
+    WCHAR aff[64];
+    return (fix & (FX_HIGH | FX_GPU)) | (lasso_aff(fix, aff, countof(aff)) ? fix & FX_AFF : 0);
+}
+
+// The exes with a fix on, lower case, with their fixes; svc: only the ones the service watches, with what it keeps of
+// them (not what Process Lasso does). Read by the service every few seconds.
+static int games_on_list(WCHAR (*out)[64], int *fix, int cap, bool svc)
 {
     HKEY k;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, GM_KEY, 0, KEY_READ, &k) != ERROR_SUCCESS) return 0;
@@ -164,17 +270,22 @@ static int games_on_list(WCHAR (*out)[64], int cap, bool svc)
     for (DWORD i = 0; n < cap; i++) {
         DWORD nl = countof(name);
         if (RegEnumKeyExW(k, i, name, &nl, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
-        if (gm_get_dw(name, L"On", 0) && !(svc && gm_get_dw(name, L"Lasso", 0))) wcopy(out[n++], 64, name);
+        int f = gm_fix(name);
+        if (svc && gm_get_dw(name, L"Lasso", 0)) f &= ~lasso_part(f);
+        if (!f) continue;
+        fix[n] = f;
+        wcopy(out[n++], 64, name);
     }
     RegCloseKey(k);
     return n;
 }
 
-// Whether a game needs the service: one that is on and not in Process Lasso's hands.
+// Whether a game needs the service: one with a fix that Process Lasso doesn't keep.
 static bool games_any(void)
 {
     WCHAR one[1][64];
-    return games_on_list(one, 1, true) > 0;
+    int fix[1];
+    return games_on_list(one, fix, 1, true) > 0;
 }
 
 // --- the priority, through Image File Execution Options ------------------------------------------------------------
@@ -259,18 +370,24 @@ static bool gpu_prio_set(HANDLE proc, UINT cls)
     return fn && fn(proc, cls) == 0;
 }
 
-// High CPU and GPU priority and every CPU but CPU 0 (on), or Normal and every CPU (off), for one running process.
-static bool game_proc_apply(DWORD pid, bool on)
+// The fixes in touch, as fix has them, for one running process: High CPU and GPU priority or Normal, the affinity,
+// power throttling off or Windows' own choice.
+static bool game_proc_apply(DWORD pid, int fix, int touch)
 {
     HANDLE p = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!p) return false;
+    bool ok = true;
+    if (touch & FX_HIGH) ok &= SetPriorityClass(p, (fix & FX_HIGH) ? HIGH_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS) != 0;
+    if ((touch & FX_GPU) && !gpu_prio_set(p, (fix & FX_GPU) ? 4 : 2)) log_msg("games: no GPU priority for pid %lu", pid);
     DWORD_PTR pm = 0, sm = 0;
-    bool ok = SetPriorityClass(p, on ? HIGH_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS) != 0;
-    if (GetProcessAffinityMask(p, &pm, &sm) && sm) {
-        DWORD_PTR want = on && (sm & ~(DWORD_PTR)1) ? sm & ~(DWORD_PTR)1 : sm;
+    if ((touch & FX_AFF) && GetProcessAffinityMask(p, &pm, &sm) && sm) {
+        DWORD_PTR want = (DWORD_PTR)fx_mask(fix, sm);
         if (pm != want) ok &= SetProcessAffinityMask(p, want) != 0;
     }
-    if (!gpu_prio_set(p, on ? 4 : 2)) log_msg("games: no GPU priority for pid %lu", pid);
+    if (touch & FX_ECO) {
+        PROCESS_POWER_THROTTLING_STATE pt = { PROCESS_POWER_THROTTLING_CURRENT_VERSION, (fix & FX_ECO) ? PROCESS_POWER_THROTTLING_EXECUTION_SPEED : 0, 0 };
+        ok &= SetProcessInformation(p, ProcessPowerThrottling, &pt, sizeof pt) != 0;
+    }
     CloseHandle(p);
     return ok;
 }
@@ -309,10 +426,15 @@ static bool proc_path(DWORD pid, WCHAR *out)
     return ok;
 }
 
+typedef struct ApplyCtx {
+    int fix, touch;
+} ApplyCtx;
+
 static void apply_cb(DWORD pid, int which, void *ctx)
 {
     (void)which;
-    if (!game_proc_apply(pid, ctx != NULL)) log_msg("games: can't set pid %lu (%lu)", pid, GetLastError());
+    const ApplyCtx *a = (const ApplyCtx *)ctx;
+    if (!game_proc_apply(pid, a->fix, a->touch)) log_msg("games: can't set pid %lu (%lu)", pid, GetLastError());
 }
 
 // --- the service's watcher -----------------------------------------------------------------------------------------
@@ -324,26 +446,29 @@ static int g_gw_nseen;
 typedef struct GwTick {
     DWORD now[256];
     int nnow;
+    const int *fix;
 } GwTick;
 
 static void watch_cb(DWORD pid, int which, void *ctx)
 {
-    (void)which;
     GwTick *t = (GwTick *)ctx;
     if (t->nnow < countof(t->now)) t->now[t->nnow++] = pid;
     for (int i = 0; i < g_gw_nseen; i++)
         if (g_gw_seen[i] == pid) return;
     // once per process: one an anti-cheat guards refuses every time, its priority still comes from IFEO
-    if (game_proc_apply(pid, true)) log_msg("service: game process %lu on High without CPU 0", pid);
+    int f = t->fix[which];
+    if (game_proc_apply(pid, f, f)) log_msg("service: game process %lu set (fixes %d)", pid, f);
     else log_msg("service: can't set game process %lu (%lu)", pid, GetLastError());
 }
 
 static void games_watch_tick(void)
 {
     WCHAR names[GM_MAX][64];
-    int n = games_on_list(names, GM_MAX, true);
+    int fix[GM_MAX];
+    int n = games_on_list(names, fix, GM_MAX, true);
     GwTick t;
     t.nnow = 0;
+    t.fix = fix;
     procs_each(names, n, watch_cb, &t);
     memcpy(g_gw_seen, t.now, sizeof(DWORD) * (size_t)t.nnow);
     g_gw_nseen = t.nnow;
@@ -547,60 +672,53 @@ static bool lasso_rule(LassoIni *ini, const WCHAR *key, int per, const WCHAR *ex
     return ok;
 }
 
-// The affinity Process Lasso takes: every CPU but 0.
-static void lasso_aff(WCHAR *out, int cap)
-{
-    DWORD n = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-    if (n > 1) wfmt(out, cap, L"0,1-%lu", n - 1);
-    else out[0] = 0;
-}
-
-// Writes or takes out one game's rules. Only while Process Lasso runs (its engine picks the file up); true when written.
-static bool lasso_set(const WCHAR *exe, bool on)
+// Writes, changes or takes out one game's rules for the fixes Lasso keeps (lasso_part); true when written. A rule the
+// user had for the exe is kept from the first change and put back where no fix needs that key any more.
+static bool lasso_set(const WCHAR *exe, int fix)
 {
     WCHAR path[MAX_PATH];
     if (!lasso_ini(path)) return false;
     LassoIni ini;
     if (!lasso_load(path, &ini)) return false;
-    WCHAR old_p[128], old_a[128], old_g[128], aff[64];
-    bool ok;
-    if (on) {
-        lasso_aff(aff, countof(aff));
-        // GPU priority 4 is High, as Lasso's menu writes it
-        ok = lasso_rule(&ini, L"DefaultPriorities", 2, exe, old_p, countof(old_p), L"high") &&
-             lasso_rule(&ini, L"DefaultAffinitiesEx", 3, exe, old_a, countof(old_a), aff) &&
-             lasso_rule(&ini, L"DefaultGPUPriorities", 2, exe, old_g, countof(old_g), L"4");
-        // what the user had in Lasso before, kept once
-        if (ok && !gm_get_dw(exe, L"Lasso", 0)) {
-            gm_put_sz(exe, L"LassoPrio", old_p);
-            gm_put_sz(exe, L"LassoAff", old_a);
-            gm_put_sz(exe, L"LassoGpu", old_g);
-        }
-    } else {
-        WCHAR keep_p[128], keep_a[128], keep_g[128];
-        gm_get_sz(exe, L"LassoPrio", keep_p, countof(keep_p));
-        gm_get_sz(exe, L"LassoAff", keep_a, countof(keep_a));
-        gm_get_sz(exe, L"LassoGpu", keep_g, countof(keep_g));
-        ok = lasso_rule(&ini, L"DefaultPriorities", 2, exe, NULL, 0, keep_p) && lasso_rule(&ini, L"DefaultAffinitiesEx", 3, exe, NULL, 0, keep_a) &&
-             lasso_rule(&ini, L"DefaultGPUPriorities", 2, exe, NULL, 0, keep_g);
+    static const WCHAR *keys[3] = { L"DefaultPriorities", L"DefaultAffinitiesEx", L"DefaultGPUPriorities" };
+    static const WCHAR *saved[3] = { L"LassoPrio", L"LassoAff", L"LassoGpu" };
+    static const int per[3] = { 2, 3, 2 };
+    bool had = gm_get_dw(exe, L"Lasso", 0) != 0;
+    WCHAR aff[64], old[3][128], keep[3][128];
+    // GPU priority 4 is High, as Lasso's menu writes it
+    const WCHAR *want[3] = { fix & FX_HIGH ? L"high" : NULL, lasso_aff(fix, aff, countof(aff)) ? aff : NULL, fix & FX_GPU ? L"4" : NULL };
+    bool on = want[0] || want[1] || want[2], ok = true;
+    for (int k = 0; k < 3 && ok; k++) {
+        keep[k][0] = 0;
+        if (had) gm_get_sz(exe, saved[k], keep[k], countof(keep[k]));
+        ok = lasso_rule(&ini, keys[k], per[k], exe, old[k], countof(old[k]), on ? want[k] : NULL);
+        // not ours to set: what the user had, from the first change or what was there just now
+        const WCHAR *back = had ? keep[k] : old[k];
+        if (ok && !(on && want[k]) && back[0]) ok = lasso_rule(&ini, keys[k], per[k], exe, NULL, 0, back);
     }
     ok = ok && lasso_save(path, &ini);
     free(ini.text);
-    if (ok && on) gm_put_dw(exe, L"Lasso", 1);
-    if (ok && !on) gm_del(exe, L"Lasso");
-    log_msg("games: Process Lasso rules for %ls %s%s", exe, on ? "added" : "removed", ok ? "" : " - failed");
+    if (ok && on && !had) {
+        for (int k = 0; k < 3; k++) gm_put_sz(exe, saved[k], old[k]);
+        gm_put_dw(exe, L"Lasso", 1);
+    }
+    if (ok && !on) {
+        for (int k = 0; k < 3; k++) gm_del(exe, saved[k]);
+        gm_del(exe, L"Lasso");
+    }
+    log_msg("games: Process Lasso rules for %ls %s%s", exe, on ? "set" : "removed", ok ? "" : " - failed");
     return ok;
 }
 
-// Whether the game's affinity rule is in prolasso.ini now (the Lasso GUI can save over it).
-static bool lasso_has(const WCHAR *exe)
+// Whether the game is in one of prolasso.ini's rule lists now (the Lasso GUI can save over it).
+static bool lasso_has(const WCHAR *exe, const WCHAR *key)
 {
     WCHAR path[MAX_PATH];
     LassoIni ini;
     if (!lasso_ini(path) || !lasso_load(path, &ini)) return false;
     int st, en;
     bool has = false;
-    if (lasso_find(ini.text, L"DefaultAffinitiesEx", &st, &en)) {
+    if (lasso_find(ini.text, key, &st, &en)) {
         ini.text[en] = 0;
         int el = wlen(exe);
         for (WCHAR *p = ini.text + st; *p && !has; p = wcschr(p, L',') ? wcschr(p, L',') + 1 : p + wlen(p))
@@ -610,37 +728,42 @@ static bool lasso_has(const WCHAR *exe)
     return has;
 }
 
-// --- turning a game on and off, from the app -----------------------------------------------------------------------
+// --- turning fixes on and off, from the app ------------------------------------------------------------------------
 
-// True when the priority is in IFEO and, where Lasso keeps the game, its rules in prolasso.ini.
-static bool game_set(const Game *g, bool on)
+// Sets a game's fixes: the priority in IFEO, the rules in prolasso.ini where Lasso keeps the game, and what changed on
+// its running processes. True when all of it went in.
+static bool game_set(const Game *g, int fix)
 {
     WCHAR exe[64];
     exe_lower(exe, countof(exe), g->exe);
+    int was = gm_fix(exe);
     gm_put_sz(exe, L"Name", g->name);
     gm_put_sz(exe, L"Path", g->path);
     if (g->custom) gm_put_dw(exe, L"Custom", 1);
-    gm_put_dw(exe, L"On", on ? 1 : 0);
-    bool ok = ifeo_set(exe, on);
-    // with Process Lasso installed it keeps the game, not the service
+    gm_put_dw(exe, L"Fix", fix);
+    gm_put_dw(exe, L"On", fix ? 1 : 0);
+    bool ok = true;
+    if ((was ^ fix) & FX_HIGH) ok &= ifeo_set(exe, (fix & FX_HIGH) != 0);
+    // with Process Lasso installed it keeps the priority and the affinity, not the service
     WCHAR ini[MAX_PATH];
-    if (on ? lasso_ini(ini) : gm_get_dw(exe, L"Lasso", 0) != 0) ok &= lasso_set(exe, on);
+    if (gm_get_dw(exe, L"Lasso", 0) || (lasso_part(fix) && lasso_ini(ini))) ok &= lasso_set(exe, fix);
     WCHAR names[1][64];
     wcopy(names[0], 64, exe);
-    procs_each(names, 1, apply_cb, on ? (void *)1 : NULL);
-    // a known game that is off leaves nothing behind
-    if (!on && !g->custom) {
+    ApplyCtx a = { fix, was ^ fix };
+    procs_each(names, 1, apply_cb, &a);
+    // a known game with nothing on leaves nothing behind
+    if (!fix && !g->custom) {
         WCHAR key[160];
         wfmt(key, countof(key), GM_KEY L"\\%s", exe);
         RegDeleteKeyW(HKEY_LOCAL_MACHINE, key);
     }
-    log_msg("games: %ls %s%s", exe, on ? "on" : "off", ok ? "" : " - failed");
+    log_msg("games: %ls fixes %d -> %d%s", exe, was, fix, ok ? "" : " - failed");
     return ok;
 }
 
 static bool game_forget(const Game *g)
 {
-    bool ok = !g->on || game_set(g, false);
+    bool ok = !g->fix || game_set(g, 0);
     WCHAR exe[64], key[160];
     exe_lower(exe, countof(exe), g->exe);
     wfmt(key, countof(key), GM_KEY L"\\%s", exe);
@@ -648,16 +771,18 @@ static bool game_forget(const Game *g)
     return ok;
 }
 
-// Process Lasso put in after the games were turned on, or its GUI saved over the rules: write them again. Lasso
+// Process Lasso put in after the fixes were turned on, or its GUI saved over the rules: write them again. Lasso
 // removed: the service takes its games back. True when a game changed hands between the two.
 static bool lasso_sync(void)
 {
     WCHAR names[GM_MAX][64], ini[MAX_PATH];
-    int n = games_on_list(names, GM_MAX, false);
+    int fix[GM_MAX];
+    int n = games_on_list(names, fix, GM_MAX, false);
     bool have = lasso_ini(ini), moved = false;
     for (int i = 0; i < n; i++) {
         bool was = gm_get_dw(names[i], L"Lasso", 0) != 0;
-        if (have && !lasso_has(names[i])) lasso_set(names[i], true);
+        int lp = lasso_part(fix[i]);
+        if (have && lp && !lasso_has(names[i], (lp & FX_AFF) ? L"DefaultAffinitiesEx" : (lp & FX_HIGH) ? L"DefaultPriorities" : L"DefaultGPUPriorities")) lasso_set(names[i], fix[i]);
         else if (!have && was) gm_del(names[i], L"Lasso");
         moved |= was != (gm_get_dw(names[i], L"Lasso", 0) != 0);
     }
@@ -824,7 +949,7 @@ static int games_scan(Game *list)
             gm_get_sz(exe, L"Path", path, countof(path));
             int at = n;
             n = games_add(list, n, name, exe, path, gm_get_dw(exe, L"Custom", 0) != 0);
-            if (n > at) list[at].on = gm_get_dw(exe, L"On", 0) != 0;
+            if (n > at) list[at].fix = gm_fix(exe);
         }
         RegCloseKey(k);
     }

@@ -70,7 +70,7 @@ static const WCHAR *rb_title(const WCHAR *name)
 {
     if (!wcscmp(name, L"Msi")) return L"MSI Mode";
     if (!wcscmp(name, L"Gpu")) return L"GPU Affinity";
-    if (!wcscmp(name, L"Hags") || !wcscmp(name, L"Mpo")) return TR("Графика", "Graphics");
+    if (!wcscmp(name, L"Hags") || !wcscmp(name, L"Mpo") || !wcscmp(name, L"Vbs")) return TR("Графика", "Graphics");
     return name;
 }
 
